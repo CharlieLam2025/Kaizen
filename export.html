@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>拆砖笔记</title>
+  <link rel="stylesheet" href="export.css" />
+</head>
+<body>
+  <div class="sheet-bar no-print">
+    <div class="sheet-brand">拆砖 · 导出笔记</div>
+    <div class="sheet-actions">
+      <button id="essayBtn" class="ghost" type="button">请 AI 写成一篇</button>
+      <button id="mdBtn" class="ghost" type="button">下载 Markdown</button>
+      <button id="obsBtn" class="ghost" type="button">Obsidian 版</button>
+      <button id="printBtn" class="primary" type="button">打印 / 存成 PDF</button>
+    </div>
+  </div>
+  <p class="sheet-hint no-print" id="sheetHint">
+    预览确认后点「打印 / 存成 PDF」。打印机选「另存为 PDF」，并勾选「背景图形」。
+  </p>
+  <article id="doc" class="doc"></article>
+  <script src="export.js"></script>
+</body>
+</html>

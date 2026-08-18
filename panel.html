@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>拆砖</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <!-- 首次设置：没配齐 Key 时占满全屏，不藏在齿轮后面 -->
+  <section id="setupGate" class="setup" hidden>
+    <div class="setup-mark">拆砖</div>
+    <h1 id="setupTitle">先花两分钟配好钥匙</h1>
+    <p class="setup-lead" id="setupLead">
+      拆砖用你自己的账号，不提供额度。两个 Key 都填上，才能读字幕、拆知识、查生词。
+    </p>
+
+    <div class="setup-steps">
+      <div class="setup-card">
+        <div class="setup-n">1</div>
+        <div>
+          <h2>DeepSeek · 拆解和查词</h2>
+          <ol>
+            <li>打开 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">API Keys 页面</a>，没有账号会先让你注册。</li>
+            <li>点 <em>Create new API key</em>，名字填「拆砖」即可。</li>
+            <li>立刻复制完整 Key（一般只显示一次）。</li>
+          </ol>
+          <label class="field">
+            <span>DeepSeek API Key</span>
+            <input type="password" id="setupKey" placeholder="sk-..." autocomplete="off" />
+          </label>
+        </div>
+      </div>
+      <div class="setup-card">
+        <div class="setup-n">2</div>
+        <div>
+          <h2>Supadata · 字幕</h2>
+          <ol>
+            <li>打开 <a href="https://dash.supadata.ai/auth/sign-up" target="_blank" rel="noreferrer">Supadata 注册页</a>，走完新手引导。</li>
+            <li>引导里会自动生成 Key，之后可在 <a href="https://dash.supadata.ai/" target="_blank" rel="noreferrer">控制台</a> 查找。</li>
+          </ol>
+          <label class="field">
+            <span>Supadata API Key</span>
+            <input type="password" id="setupSupadata" placeholder="sd_..." autocomplete="off" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-card">
+      <div class="setup-n">3</div>
+      <div>
+        <h2>DeepSeek 用哪个</h2>
+        <p class="setup-lead" style="margin-bottom:8px">两个都能用。Flash 快、便宜；Pro 更稳、更适合拆解。</p>
+        <input type="hidden" id="setupModel" value="deepseek-v4-flash" />
+        <input type="hidden" id="setupDiveModel" value="deepseek-v4-pro" />
+        <div class="model-pick" id="setupModelPick">
+          <button type="button" class="model-card on" data-pick="flash">
+            <b>Flash</b>
+            <span>日常默认 · 翻译、提问、做成图</span>
+          </button>
+          <button type="button" class="model-card" data-pick="pro">
+            <b>Pro</b>
+            <span>更强 · 拆解和长笔记默认用它</span>
+          </button>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="setupDiveFollow" />
+          <span>拆解也改成和上面同一个（默认拆解走 Pro）</span>
+        </label>
+        <details class="setup-more">
+          <summary>接口地址</summary>
+          <label class="field">
+            <span>一般不用改</span>
+            <input type="text" id="setupBase" placeholder="https://api.deepseek.com/v1" />
+          </label>
+        </details>
+      </div>
+    </div>
+
+    <button id="setupSave" class="btn btn-primary btn-lg">保存并开始</button>
+    <p class="setup-foot">Key 只存在这台电脑的浏览器里。DeepSeek 说明：<a href="https://api-docs.deepseek.com/" target="_blank" rel="noreferrer">api-docs.deepseek.com</a> · Supadata 定价：<a href="https://supadata.ai/pricing" target="_blank" rel="noreferrer">supadata.ai/pricing</a></p>
+  </section>
+
+  <!-- 功能小教程 -->
+  <section id="tutorial" class="tutorial" hidden>
+    <div class="tutorial-card">
+      <div class="tutorial-kicker" id="tutKicker">1 / 5</div>
+      <h2 id="tutTitle">把字幕当成一本书</h2>
+      <p id="tutBody">双语对照是主界面。像微信读书一样，在句子上划线、写笔记、查生词。点左边时间就能跳到那一秒。</p>
+      <div class="tutorial-dots" id="tutDots"></div>
+      <div class="tutorial-actions">
+        <button id="tutSkip" class="text-btn" type="button">跳过</button>
+        <div class="right">
+          <button id="tutPrev" class="btn" type="button" hidden>上一步</button>
+          <button id="tutNext" class="btn btn-primary" type="button">下一步</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <header class="topbar">
+    <div class="brand">拆<span>砖</span></div>
+    <div class="top-actions">
+      <div class="seg-toggle model-switch" id="modelSwitch" title="DeepSeek 日常模型">
+        <button type="button" class="seg-btn" data-m="deepseek-v4-flash">Flash</button>
+        <button type="button" class="seg-btn" data-m="deepseek-v4-pro">Pro</button>
+      </div>
+      <button id="exportTopBtn" class="text-btn" type="button">导出</button>
+      <button id="moreBtn" class="icon-btn" type="button" title="更多" aria-expanded="false">···</button>
+    </div>
+  </header>
+  <div id="moreMenu" class="more-menu" hidden>
+    <button id="tutReplay" type="button">教程</button>
+    <button id="settingsBtn" type="button">设置</button>
+  </div>
+
+  <section id="settingsDrawer" class="drawer" hidden></section>
+
+  <section id="stateBox" class="state-box">
+    <div class="state-mark" id="stateEmoji">拆</div>
+    <div class="state-title" id="stateTitle">打开一个 YouTube 视频</div>
+    <div class="state-sub" id="stateSub">配好钥匙之后，打开任意有字幕的视频，阅读器会自动铺开。</div>
+    <div class="state-actions">
+      <button id="stateRetry" class="btn" hidden>重试</button>
+      <button id="stateReview" class="btn" hidden>先复习到期的卡</button>
+    </div>
+  </section>
+
+  <main id="mainBox" hidden>
+    <div class="video-title" id="videoTitle"></div>
+    <div class="progress-meter" id="progressMeter"></div>
+
+    <nav class="views">
+      <button class="view-tab active" data-view="read">阅读</button>
+      <button class="view-tab" data-view="bricks">拆砖</button>
+      <button class="view-tab" data-view="maps">图谱</button>
+      <button class="view-tab" data-view="ask">提问</button>
+      <button class="view-tab" data-view="notes">笔记</button>
+      <button class="view-tab" data-view="shelf">库</button>
+      <button class="view-tab" data-view="review">复习<span id="reviewBadge" class="tab-badge" hidden></span></button>
+    </nav>
+
+    <section class="view active" data-view="read">
+      <div class="reader-tools">
+        <div class="seg-toggle read-lang" role="group" aria-label="字幕语言">
+          <button id="modeOriginal" class="seg-btn">原文</button>
+          <button id="modeBilingual" class="seg-btn active">双语</button>
+          <button id="modeZh" class="seg-btn">中文</button>
+        </div>
+        <div class="reader-chrome">
+        <button id="followBtn" class="ghost-chip active" type="button">跟随</button>
+        <form id="jumpForm" class="jump-form">
+          <input id="jumpInput" type="text" inputmode="numeric" placeholder="12:30" aria-label="跳到时间" />
+        </form>
+        <button id="typeSmaller" class="icon-btn" type="button" title="字号减小">A−</button>
+        <button id="typeBigger" class="icon-btn" type="button" title="字号增大">A+</button>
+        <button id="focusBtn" class="ghost-chip" type="button" title="藏起工具条，只留正文">沉浸</button>
+        </div>
+      </div>
+      <div class="reader-tools reader-find">
+        <input id="readerSearch" class="reader-search" type="search" placeholder="在这篇里找…" />
+      </div>
+      <div id="resumeBanner" class="resume" hidden></div>
+      <div id="searchHits" class="search-hits" hidden></div>
+      <article id="transcriptBox" class="reader"></article>
+    </section>
+
+    <section class="view" data-view="bricks">
+      <div id="studyBox" class="study-box"></div>
+      <div class="brick-index" id="brickIndex" hidden></div>
+      <div class="chip-rail" id="brickBar"></div>
+      <div class="bricks-toolbar">
+        <div class="notes-tabs" id="brickFilter">
+          <button class="seg-btn active" data-progress="all">全部</button>
+          <button class="seg-btn" data-progress="fresh">未开始</button>
+          <button class="seg-btn" data-progress="learning">进行中</button>
+          <button class="seg-btn" data-progress="done">已学会</button>
+        </div>
+        <p class="brick-status" id="brickStatus" hidden></p>
+      </div>
+      <div id="brickList"></div>
+    </section>
+
+    <section class="view" data-view="maps">
+      <div class="notes-tabs map-tabs">
+        <button class="seg-btn active" data-map="mind">思维导图</button>
+        <button class="seg-btn" data-map="concept">概念图</button>
+        <button class="seg-btn" data-map="arg">论证图</button>
+        <button class="seg-btn" data-map="time">时间线</button>
+        <button class="seg-btn" data-map="atlas">跨视频</button>
+      </div>
+      <p class="map-help" id="mapHelp">点节点可跳转、展开或打开对应知识块。</p>
+      <div id="mapBox" class="map-box"></div>
+    </section>
+
+    <section class="view" data-view="ask">
+      <div class="ask-context" id="askContext"></div>
+      <div class="chat-box" id="chatBox">
+        <div class="chat-empty" id="chatEmpty">问整支视频，或先在阅读里划一句话再来问。答案里的时间能点。</div>
+      </div>
+      <form class="ask-form" id="askForm">
+        <textarea id="askInput" rows="2" placeholder="问这支视频… Enter 发送"></textarea>
+        <button type="submit" class="btn btn-primary" id="askSend">发送</button>
+      </form>
+    </section>
+
+    <section class="view" data-view="notes">
+      <div class="notes-toolbar">
+        <div class="notes-tabs">
+          <button class="seg-btn active" data-notes="highlights">划线</button>
+          <button class="seg-btn" data-notes="quotes">金句</button>
+          <button class="seg-btn" data-notes="memos">笔记</button>
+          <button class="seg-btn" data-notes="vocab">生词本</button>
+        </div>
+        <button id="exportBtn" class="btn" type="button">导出笔记</button>
+      </div>
+      <div id="notesBox"></div>
+    </section>
+
+    <section class="view" data-view="shelf">
+      <div class="notes-tabs" id="shelfFilter">
+        <button class="seg-btn active" data-shelf="new">新进</button>
+        <button class="seg-btn" data-shelf="later">以后</button>
+        <button class="seg-btn" data-shelf="shortlist">精选</button>
+        <button class="seg-btn" data-shelf="done">看完</button>
+      </div>
+      <p class="map-help">打开过的视频会进「新进」。先分拣，再精读。</p>
+      <div id="shelfBox"></div>
+    </section>
+
+    <section class="view" data-view="review">
+      <div id="reviewBox"></div>
+    </section>
+  </main>
+
+  <div id="selBar" class="selbar" hidden>
+    <button type="button" data-act="mark" data-color="def" title="定义">定义</button>
+    <button type="button" data-act="mark" data-color="ex" title="例子">例子</button>
+    <button type="button" data-act="mark" data-color="contra" title="反驳">反驳</button>
+    <button type="button" data-act="mark" data-color="act" title="行动">行动</button>
+    <button type="button" data-act="note">笔记</button>
+    <button type="button" data-act="define">查词</button>
+    <button type="button" data-act="vocab">存词</button>
+    <button type="button" data-act="ask">问这句</button>
+  </div>
+
+  <div id="noteModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>写一句笔记</h3>
+      <p class="modal-quote" id="noteQuote"></p>
+      <textarea id="noteInput" rows="4" placeholder="这一句为什么值得记…"></textarea>
+      <div class="modal-actions">
+        <button id="noteCancel" class="btn" type="button">取消</button>
+        <button id="noteSave" class="btn btn-primary" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="recallModal" class="modal" hidden>
+    <div class="modal-card recall-card">
+      <h3>闭卷复盘</h3>
+      <p class="modal-quote">不看字幕，凭记忆写下这支视频讲了什么。写完交给 AI 对照，看漏了什么、记岔了什么。</p>
+      <textarea id="recallInput" rows="7" placeholder="它讲了…&#10;核心观点是…&#10;我记得的例子有…"></textarea>
+      <div id="recallResult" hidden></div>
+      <div class="modal-actions">
+        <button id="recallCancel" class="btn" type="button">关闭</button>
+        <button id="recallSubmit" class="btn btn-primary" type="button">对照字幕批改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="focusDock" class="focus-dock" hidden>
+    <div class="seg-toggle" id="focusLang" role="group" aria-label="字幕语言">
+      <button type="button" class="seg-btn" data-tm="original">原文</button>
+      <button type="button" class="seg-btn" data-tm="bilingual">双语</button>
+      <button type="button" class="seg-btn" data-tm="zh">中文</button>
+    </div>
+    <button id="focusExit" class="focus-exit" type="button">退出沉浸</button>
+  </div>
+  <script src="panel.js"></script>
+</body>
+</html>
