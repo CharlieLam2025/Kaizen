@@ -32,7 +32,7 @@
 3. 看完小教程（可跳过，顶栏「教程」可重看）。
 4. 打开有字幕的 YouTube 或 B 站视频，阅读器会自动铺开。
 
-给朋友：在本目录运行 `powershell -File scripts/pack.ps1`，把 `dist/kaizen.zip` 发给他。他解压后按上面第 1 步加载**解压后的文件夹**（不要加载 zip 本身），再自己申请两个 Key。
+给朋友：在本目录运行 `node scripts/pack.mjs`（Windows 也可以 `powershell -File scripts/pack.ps1`），把 `dist/kaizen.zip` 发给他。他解压后按上面第 1 步加载**解压后的文件夹**（不要加载 zip 本身），再自己申请两个 Key。
 
 开源或上架前请先看 [PRIVACY.md](PRIVACY.md)。Chrome 商店需要一份可公开打开的隐私页网址；把这个文件放到 GitHub 仓库里就能当链接用。商店审核期间建议先选 **不公开（Unlisted）**，用链接给朋友装，通过后再公开。
 

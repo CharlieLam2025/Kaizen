@@ -1,4 +1,8 @@
 // Kaizen UI language. Source strings are zh-CN; other packs live in i18n-dict.js.
+// Guard: manifest + executeScript may evaluate this file twice in one world.
+if (!globalThis.__KAIZEN_CS__) globalThis.__KAIZEN_CS__ = {};
+if (!globalThis.__KAIZEN_CS__.i18n) {
+globalThis.__KAIZEN_CS__.i18n = 1;
 
 const I18N_LANGS = [
   { id: "zh-CN", native: "简体中文" },
@@ -809,3 +813,4 @@ globalThis.applyDomI18n = applyDomI18n;
 globalThis.fillLangPicker = fillLangPicker;
 globalThis.aiLangLine = aiLangLine;
 globalThis.toTrad = toTrad;
+}

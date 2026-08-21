@@ -6,7 +6,7 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 8;
+const VB_CONTENT_REV = 9;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
@@ -26,7 +26,7 @@ function vbInstallContentScript() {
   const contentGen = globalThis.__vbContentGen;
   const contentLive = () => globalThis.__vbContentGen === contentGen;
   chrome.storage.local.get("vb_settings", (stored) => {
-    setUiLang(stored.vb_settings?.uiLang || detectLang());
+    setUiLang(stored.vb_settings?.uiLang || "zh-CN");
   });
 //
 // Caption fetching is layered because YouTube throttles naive approaches:
@@ -469,7 +469,16 @@ function currentVideoInfo() {
     looping: Boolean(loopRange),
     rate: video ? video.playbackRate : 1,
     ad,
+    unavailable: pageUnavailable(),
   };
+}
+
+function pageUnavailable() {
+  const title = String(document.title || "");
+  if (/video unavailable|此视频无法播放|视频无法播放|private video|此视频不可用/i.test(title)) return true;
+  const err = document.querySelector(".ytp-error-content-wrap-reason, .ytp-error, yt-player-error-message-renderer");
+  const text = String(err?.textContent || "");
+  return /unavailable|无法播放|不可用|copyright/i.test(text);
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

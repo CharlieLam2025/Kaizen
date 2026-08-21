@@ -18,6 +18,9 @@ const {
   shouldAdoptOpenWatch,
   watchAdoptDecision,
   markFaceUrl,
+  formatClock,
+  parseClockInput,
+  sameAsSource,
 } = ctx;
 
 function opened(extra = {}) {
@@ -29,6 +32,10 @@ assert.equal(videoIdFromHref("https://www.youtube.com/watch?v=abc123"), "abc123"
 assert.equal(videoIdFromHref("https://youtu.be/abc123"), "abc123");
 assert.equal(videoIdFromHref("https://www.youtube.com/shorts/abc123"), "abc123");
 assert.equal(videoIdFromHref("https://www.youtube.com/embed/abc123"), "abc123");
+assert.equal(videoIdFromHref("https://www.youtube.com/live/abc123"), "abc123");
+assert.equal(videoIdFromHref("https://youtu.be/abc123?t=90"), "abc123");
+assert.equal(videoIdFromHref("https://www.youtube-nocookie.com/embed/abc123"), "abc123");
+assert.equal(videoIdFromHref("https://m.youtube.com/watch?v=abc123"), "abc123");
 assert.equal(videoIdFromHref("https://www.bilibili.com/video/BV1xx411c7mD"), "BV1xx411c7mD");
 assert.equal(videoIdFromHref("https://www.bilibili.com/video/BV1xx411c7mD?p=3"), "BV1xx411c7mD:p3");
 assert.equal(videoIdFromHref("https://www.bilibili.com/video/av170001"), "av170001");
@@ -86,6 +93,18 @@ assert.equal(
 assert.equal(watchAdoptDecision({ videoId: "abc123", ad: true }, opened()), "skip-ad");
 assert.equal(watchAdoptDecision({ videoId: "xyz" }, { loadingVideoId: "xyz", segments: 0 }), "skip-loading");
 assert.equal(watchAdoptDecision({ videoId: "fresh", tabId: 9, source: "poll" }, { segments: 0 }), "open");
+assert.equal(watchAdoptDecision({ unavailable: true, videoId: "dead" }, opened()), "clear");
+assert.equal(watchAdoptDecision({ watchPage: true }, opened()), "clear");
+assert.equal(
+  watchAdoptDecision({ videoId: "other", tabId: 22, source: "poll", activeWatch: true }, opened()),
+  "open",
+);
+assert.equal(formatClock(5400), "1:30:00");
+assert.equal(formatClock(90), "1:30");
+assert.equal(parseClockInput("1:30:00"), 5400);
+assert.equal(parseClockInput("1:30"), 90);
+assert.equal(sameAsSource("Hello, world!", "hello world"), true);
+assert.equal(sameAsSource("你好世界", "Hello world"), false);
 
 // 旧轮询的致命顺序：先写 state.tabId，再比 tab.id，保护永远失效
 const broken = { tabId: 11, videoId: "abc123", segments: 40 };
@@ -171,7 +190,15 @@ assert.match(markFaceUrl("cat"), /mark-cat-golden/);
 assert.match(markFaceUrl("dog"), /mark-dog-samoyed/);
 assert.equal(markFaceUrl("ribbon"), "");
 assert.match(content, /document\.body\.appendChild\(next\)/, "K 条要挂在页面上，不能埋进播放器图层");
-assert.match(content, /VB_CONTENT_REV = 8/, "重载后要升 rev，才能重装 K");
+assert.match(content, /VB_CONTENT_REV = 9/, "重载后要升 rev，才能重装 K");
+assert.match(content, /pageUnavailable/, "不可播的页要能上报");
+assert.match(bg, /hasCore \? \["content\.js"\]/, "已注入过的页不能再跑 i18n.js");
+assert.match(panel, /20000/, "字幕链路要有硬超时");
+assert.match(panel, /function clearOpenedVideo/, "当前页不可读时必须清空阅读器");
+assert.match(panel, /captionsOnly/, "要有只要字幕开关");
+assert.match(panel, /function isRealTranslation/, "失败或原文不能当译文");
+assert.match(panel, /followPausedByUser/, "跟随只能暂时停");
+assert.match(panel, /decorateTextNodes/, "decorate 只能改文本节点");
 assert.match(content, /__vbRemountDock/, "已打开的视频页要能拆掉旧 K 再绑");
 assert.match(fs.readFileSync(path.join(root, "i18n.js"), "utf8"), /"拆解已收起。"|"正在对照…"/);
 try {

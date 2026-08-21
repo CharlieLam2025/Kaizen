@@ -99,7 +99,7 @@ const state = {
   dives: {},
   scripts: {},
   translations: {},
-  transcriptMode: "bilingual",
+    transcriptMode: "original",
   chat: [],
   askContext: null,
   study: null,
@@ -122,6 +122,9 @@ const state = {
 };
 
 let loadingVideoId = null;
+let videoJob = 0;
+let pendingSeek = null;
+let followPausedByUser = false;
 let transcriptFailId = "";
 let transcriptFailAt = 0;
 let isTranslating = false;
@@ -228,8 +231,7 @@ function activateView(name) {
   }
   paintView(name);
   if (name === "bricks") {
-    if (!state.blocks.length) analyzeBlocks();
-    if (!state.study) loadStudyPack();
+    if (!state.blocks.length) setBrickStatus(t("点「拆」才拆页，不会一打开就花额度。"));
   }
   if (name === "read" && followPlayback) {
     lastFollowedStart = -1;
@@ -339,13 +341,22 @@ function cleanZh(text) {
     .trim();
 }
 
+function isRealTranslation(zh, en) {
+  const cleaned = cleanZh(zh);
+  if (!cleaned) return false;
+  if (looksLikeFailedZh(cleaned)) return false;
+  if (typeof sameAsSource === "function" && sameAsSource(cleaned, en)) return false;
+  return true;
+}
+
 function translationAt(i) {
-  return cleanZh(state.translations[i]);
+  const cleaned = cleanZh(state.translations[i]);
+  if (!isRealTranslation(cleaned, state.segments[i]?.text)) return "";
+  return cleaned;
 }
 
 function clock(seconds) {
-  const s = Math.max(0, Math.floor(Number(seconds) || 0));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return typeof formatClock === "function" ? formatClock(seconds) : `${Math.floor(Math.max(0, Number(seconds) || 0) / 60)}:${String(Math.max(0, Math.floor(Number(seconds) || 0)) % 60).padStart(2, "0")}`;
 }
 
 function uid(prefix) {
@@ -736,10 +747,13 @@ function scrollToSeconds(seconds) {
 
 function pauseFollowFromUser(event) {
   if (programmaticScroll || Date.now() < followLockUntil) return;
-  if (event && Math.abs(event.deltaY || event.deltaX || 0) < 2) return;
+  const box = $("transcriptBox");
+  const el = event?.target;
+  if (!box || !el || (el !== box && !box.contains(el))) return;
+  if (event && event.type === "wheel" && Math.abs(event.deltaY || event.deltaX || 0) < 2) return;
   lastUserScrollAt = Date.now();
   if (!followPlayback) return;
-  followPlayback = false;
+  followPausedByUser = true;
   updateFollowBtn();
 }
 
@@ -763,6 +777,10 @@ function applyPlayhead(info) {
   paintMarkWalker(info.currentTime);
   const active = paintPlayingRow(info.currentTime);
   if (!followPlayback || !active || !isReadView()) return;
+  if (followPausedByUser) {
+    if (isRowNearCenter(active, 80)) followPausedByUser = false;
+    else return;
+  }
   if (Date.now() < followLockUntil) return;
   const start = Number(active.dataset.start);
   if (start === lastFollowedStart && isRowNearCenter(active, 48)) return;
@@ -776,12 +794,7 @@ async function followTickWork() {
 }
 
 function parseJumpInput(raw) {
-  const text = String(raw || "").trim().replace("：", ":");
-  if (!text) return null;
-  const clockMatch = text.match(/^(\d{1,3}):([0-5]?\d)$/);
-  if (clockMatch) return Number(clockMatch[1]) * 60 + Number(clockMatch[2]);
-  const sec = Number(text);
-  return Number.isFinite(sec) && sec >= 0 ? sec : null;
+  return typeof parseClockInput === "function" ? parseClockInput(raw) : null;
 }
 
 let focusMode = false;
@@ -812,8 +825,8 @@ function syncLangButtons() {
 function updateFollowBtn() {
   const btn = $("followBtn");
   if (!btn) return;
-  btn.classList.toggle("active", followPlayback);
-  btn.textContent = followPlayback ? "跟随" : "已停";
+  btn.classList.toggle("active", followPlayback && !followPausedByUser);
+  btn.textContent = followPlayback && !followPausedByUser ? "跟随" : "已停";
 }
 
 function watchSnapToTab(snap) {
@@ -897,14 +910,28 @@ function tabVideoId(tab) {
 }
 
 async function findWatchTab() {
+  try {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active && isWatchHost(tabHref(active))) {
+      const tab = {
+        id: active.id,
+        url: tabHref(active),
+        title: active.title || "",
+        active: true,
+        videoId: tabVideoId(active) || videoIdFromHref(tabHref(active)),
+      };
+      watchTabCache = { at: Date.now(), tab };
+      return tab;
+    }
+  } catch (_e) {}
   if (watchTabCache.tab && Date.now() - watchTabCache.at < 800 && tabVideoId(watchTabCache.tab)) {
     return watchTabCache.tab;
   }
   const listed = await listWatchTabs();
-  let picked = listed.find((tab) => tabVideoId(tab)) || listed[0] || null;
-  if (state.videoId && state.tabId) {
-    const pinned = listed.find((tab) => Number(tab.id) === Number(state.tabId));
-    if (pinned) picked = pinned;
+  let picked = listed.find((tab) => tab.active && isWatchHost(tabHref(tab))) || null;
+  if (!picked) {
+    const pinned = state.tabId ? listed.find((tab) => Number(tab.id) === Number(state.tabId)) : null;
+    if (pinned && !listed.some((tab) => tab.active && isWatchHost(tabHref(tab)))) picked = pinned;
   }
   if (!picked) {
     watchTabCache = { at: Date.now(), tab: null };
@@ -925,13 +952,12 @@ let pendingWatchInfo = null;
 
 function markWatchStage(stage, extra = {}) {
   chrome.storage.local
-    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.5", ...extra } })
+    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.6", ...extra } })
     .catch(() => {});
 }
 
 function takeIncomingWatch(info) {
   const videoId = info?.videoId || videoIdFromHref(info?.url || "");
-  if (!videoId) return;
   const next = { ...info, videoId };
   if (!keysReady()) {
     pendingWatchInfo = next;
@@ -945,6 +971,12 @@ function takeIncomingWatch(info) {
     segments: state.segments.length,
     loadingVideoId,
   });
+  if (decision === "clear") {
+    if (next.tabId) state.tabId = next.tabId;
+    clearOpenedVideo(t("这页没有可读视频"));
+    return;
+  }
+  if (!videoId) return;
   if (decision === "keep") {
     if (
       next.tabId &&
@@ -961,6 +993,30 @@ function takeIncomingWatch(info) {
   if (next.tabId) state.tabId = next.tabId;
   markWatchStage("loading", { videoId, tabId: state.tabId, source: next.source || "" });
   loadVideo(videoId, next.title || "", { force: Boolean(next.force || next.source === "user") });
+}
+
+function clearOpenedVideo(reason) {
+  videoJob += 1;
+  loadingVideoId = null;
+  isTranslating = false;
+  isAnalyzing = false;
+  isStudying = false;
+  Object.assign(state, {
+    videoId: null,
+    title: "",
+    language: "",
+    segments: [],
+    gist: "",
+    blocks: [],
+    translations: {},
+    study: null,
+    lastSeconds: 0,
+    translateFailed: {},
+  });
+  transcriptFailId = "";
+  transcriptFailAt = 0;
+  markWatchStage("cleared", { reason: String(reason || "").slice(0, 120) });
+  showStateBox("K", t("这页没有可读视频"), reason || t("换到一支能播的 YouTube 或 B 站，或把链接贴在下面。"), false, true);
 }
 
 function queueIncomingWatch(info, source) {
@@ -1021,23 +1077,14 @@ async function adoptActiveWatchNow() {
     } catch (_e) {}
   }
   try {
-    const stored = await chrome.storage.local.get(["vb_click", "vb_watch"]);
-    const snap = stored.vb_click || stored.vb_watch;
-    const id = snap?.videoId || videoIdFromHref(snap?.url || "");
-    if (id) {
-      takeIncomingWatch({ videoId: id, title: snap.title || "", tabId: snap.tabId, url: snap.url, source: "storage" });
-      return true;
-    }
-  } catch (_e) {}
-  try {
-    const all = await chrome.tabs.query({});
-    const hit = (all || []).find((tab) => videoIdFromHref(tabHref(tab)));
-    if (hit) {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active && isWatchHost(tabHref(active)) && !videoIdFromHref(tabHref(active))) {
       takeIncomingWatch({
-        videoId: videoIdFromHref(tabHref(hit)),
-        title: hit.title || "",
-        tabId: hit.id,
-        url: tabHref(hit),
+        title: active.title || "",
+        tabId: active.id,
+        url: tabHref(active),
+        watchPage: true,
+        activeWatch: true,
         source: "adopt",
       });
       return true;
@@ -1096,7 +1143,7 @@ let autoOpenKey = "";
 function maybeAutoOpenWatch(tabs) {
   if (!keysReady() || state.videoId || loadingVideoId || reviewOnly) return;
   if (transcriptFailId && Date.now() - transcriptFailAt < 12000) return;
-  const hit = (tabs || []).find((tab) => tabVideoId(tab));
+  const hit = (tabs || []).find((tab) => tab.active && tabVideoId(tab));
   if (!hit) return;
   const id = tabVideoId(hit);
   if (!id || autoOpenKey === id) return;
@@ -1106,8 +1153,13 @@ function maybeAutoOpenWatch(tabs) {
     title: hit.title || "",
     tabId: hit.id,
     url: hit.url || "",
+    activeWatch: true,
     source: "adopt",
   });
+}
+
+function captionsOnlyMode() {
+  return settingsCache.captionsOnly !== false;
 }
 
 async function paintStateTabs() {
@@ -1221,9 +1273,17 @@ async function ensureContentScript(tabId, { skipPing } = {}) {
   injectingContent = true;
   lastInjectAt = Date.now();
   try {
+    let hasCore = false;
+    try {
+      const [shot] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => Boolean(globalThis.__KAIZEN_CS__?.i18n && globalThis.__KAIZEN_CS__?.site),
+      });
+      hasCore = Boolean(shot?.result);
+    } catch (_e) {}
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["i18n.js", "i18n-dict.js", "site.js", "content.js"],
+      files: hasCore ? ["content.js"] : ["i18n.js", "i18n-dict.js", "site.js", "content.js"],
     });
     contentReadyAt = Date.now();
     contentReadyTab = tabId;
@@ -1236,15 +1296,17 @@ async function ensureContentScript(tabId, { skipPing } = {}) {
 }
 
 function linkifyTimes(text) {
-  return esc(text).replace(/\[(\d{1,3}):([0-5]\d)\]/g, (_m, min, sec) => {
-    const s = Number(min) * 60 + Number(sec);
-    return `<span class="time-link" data-s="${s}">[${min}:${sec}]</span>`;
+  return esc(text).replace(/\[(\d{1,3}):([0-5]\d)(?::([0-5]\d))?\]/g, (_m, a, b, c) => {
+    const s = c != null ? Number(a) * 3600 + Number(b) * 60 + Number(c) : Number(a) * 60 + Number(b);
+    return `<span class="time-link" data-s="${s}">${_m}</span>`;
   });
 }
 
 function parseClock(label) {
-  const m = String(label || "").match(/(\d{1,3}):([0-5]\d)/);
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  const m = String(label || "").match(/(\d{1,3}):([0-5]\d)(?::([0-5]\d))?/);
+  if (!m) return null;
+  if (m[3] != null) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  return Number(m[1]) * 60 + Number(m[2]);
 }
 
 // ---------- storage ----------
@@ -1267,7 +1329,8 @@ async function loadSettings() {
   watchRate = playbackRate;
   shadowRate = nearestPlayRate(settingsCache.shadowRate || 0.75);
   state.shadowGap = settingsCache.shadowGap !== false;
-  setUiLang(settingsCache.uiLang || detectLang());
+  setUiLang(settingsCache.uiLang || "zh-CN");
+  if (settingsCache.captionsOnly == null) settingsCache.captionsOnly = true;
   applyTheme(settingsCache.uiTheme || "paper");
   applyTypeSize();
   applyPlayRate(playbackRate, false);
@@ -2199,6 +2262,14 @@ function bindVisualHits(root, i) {
 function openVideoAt(videoId, seconds) {
   const url = watchUrl(videoId, seconds);
   if (!url) return;
+  pendingSeek = { videoId, seconds: Number(seconds) || 0 };
+  takeIncomingWatch({
+    videoId,
+    url,
+    tabId: state.tabId,
+    force: true,
+    source: "user",
+  });
   if (state.tabId) chrome.tabs.update(state.tabId, { url });
   else chrome.tabs.create({ url });
 }
@@ -3097,6 +3168,7 @@ async function saveCache() {
     graphLayout,
     resumeHint: state.resumeHint || null,
     quoteExtracted: Boolean(state.quoteExtracted),
+    blocksLang: currentLang(),
     levelScan: state.levelScan || null,
     vocabPreviewDone: Boolean(state.vocabPreviewDone),
     vocabPreviewKey: state.vocabPreviewDone ? `${state.videoId}:${resolveVocabLevel().key}` : "",
@@ -3279,6 +3351,17 @@ async function changeUiLang(lang) {
     return;
   }
   await saveSettings({ uiLang: next });
+  if (state.blocks.length) {
+    const sample = `${state.blocks[0].title || ""} ${state.blocks[0].summary || ""}`;
+    const staleEn = next.startsWith("zh") && !/[\u4e00-\u9fff]/.test(sample) && /[A-Za-z]{4,}/.test(sample);
+    if (staleEn) {
+      state.blocks = [];
+      state.gist = "";
+      state.dives = {};
+      state.study = null;
+      saveCacheSoon(200);
+    }
+  }
   refreshI18nChrome();
 }
 
@@ -3406,6 +3489,8 @@ function fillSettingsDrawer() {
       <input type="text" id="setVocabScore" inputmode="decimal" placeholder="${t("例如 6.5")}" />
     </label>
     <button id="setVocabTest" class="text-btn" type="button">${t("测一下词汇量")}</button>
+    <label class="field check"><span><input type="checkbox" id="setCaptionsOnly" ${captionsOnlyMode() ? "checked" : ""} /> ${t("只要字幕")}</span></label>
+    <p class="setup-lead">${t("打开后不自动翻译、拆页或做学习包。点「双语」或「拆」再花额度。")}</p>
     <div class="drawer-actions" style="margin-top:8px">
       <button id="settingsSave" class="btn btn-primary" type="button">${t("保存")}</button>
       <span id="settingsSaved" hidden style="color:#3aa06a;margin-left:8px">${t("已保存")}</span>
@@ -3429,6 +3514,10 @@ function fillSettingsDrawer() {
       <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">申请 DeepSeek</a>
       ·
       <a href="https://dash.supadata.ai/auth/sign-up" target="_blank" rel="noreferrer">申请 Supadata</a>
+      ·
+      <a href="https://github.com/CharlieLam2025/Kaizen/blob/main/PRIVACY.md" target="_blank" rel="noreferrer">${t("隐私说明")}</a>
+      ·
+      <a href="https://github.com/CharlieLam2025/Kaizen/issues" target="_blank" rel="noreferrer">Issues</a>
     </p>
     ${authorBlockHtml("card")}
   `;
@@ -3466,7 +3555,7 @@ function fillSettingsDrawer() {
   });
   $("setVocabTest")?.addEventListener("click", () => openVocabTest());
   $("settingsSave").addEventListener("click", async () => {
-    await saveSettings({
+    const next = {
       apiKey: $("setKey").value.trim(),
       supadataKey: $("setSupadata").value.trim(),
       baseUrl: $("setBase").value.trim() || "https://api.deepseek.com/v1",
@@ -3474,9 +3563,11 @@ function fillSettingsDrawer() {
       diveModel: $("setDiveModel").value || "deepseek-v4-pro",
       uiLang: currentLang(),
       uiTheme: settingsCache.uiTheme || "paper",
+      captionsOnly: Boolean($("setCaptionsOnly")?.checked),
       ...readVocabSettings("set"),
       koulingUrl: $("setKoulingUrl")?.value.trim() || "",
-    });
+    };
+    await saveSettings(next);
     state.levelScan = null;
     state.vocabPreviewDone = false;
     vocabCardIndex = 0;
@@ -3489,8 +3580,22 @@ function fillSettingsDrawer() {
       if ($("setupLead")) $("setupLead").textContent = t("先填 DeepSeek Key。字幕优先用视频自己的。");
       return;
     }
+    const ping = await sendToBg({
+      action: "vbPingKeys",
+      apiKey: next.apiKey,
+      supadataKey: next.supadataKey,
+      baseUrl: next.baseUrl,
+    }).catch(() => null);
+    const bits = [];
+    if (ping?.deepseek && !ping.deepseek.ok) bits.push(t("DeepSeek Key 连不上") + (ping.deepseek.error ? `：${ping.deepseek.error}` : ""));
+    if (ping?.supadata && !ping.supadata.ok && !ping.supadata.skipped) {
+      bits.push(t("Supadata Key 连不上") + (ping.supadata.error ? `：${ping.supadata.error}` : ""));
+    }
     $("settingsSaved").hidden = false;
-    setTimeout(() => ($("settingsSaved").hidden = true), 1200);
+    $("settingsSaved").textContent = bits.length ? bits.join(" · ") : t("已保存");
+    $("settingsSaved").style.color = bits.length ? "#b42318" : "#3aa06a";
+    flashHint(bits.length ? bits.join(" · ") : t("设置已保存"));
+    setTimeout(() => ($("settingsSaved").hidden = true), 2400);
   });
   $("backupExport")?.addEventListener("click", exportAllData);
   $("backupImport")?.addEventListener("click", () => $("backupFile")?.click());
@@ -3620,7 +3725,14 @@ function friendlyAiError(raw, fallback) {
 }
 
 function friendlyTranscriptError(raw) {
-  return friendlyAiError(raw, t("点重试，或换一支有字幕的视频。"));
+  const e = String(raw || "").trim();
+  if (/429|limit[- ]?exceeded|额度用完|quota/i.test(e)) return t("字幕额度用完了");
+  if (/401|Key 无效|invalid api|unauthorized/i.test(e)) return t("字幕 Key 无效，去设置里看一下。");
+  if (/206|没有原生字幕|没有可用字幕|无字幕轨|字幕是空/i.test(e)) return t("这支视频没有可用字幕。");
+  if (/超时|timeout/i.test(e)) return t("打开字幕超时了，点重试。");
+  if (/412|拒绝了这次访问/i.test(e)) return t("B 站拒绝了这次访问，稍后重试");
+  if (/登录/.test(e)) return t("B 站字幕要先登录。打开这支视频确认能出字幕，再点重试。");
+  return friendlyAiError(raw, t("暂时读不到字幕。点重试。"));
 }
 
 function looksLikeFailedZh(text) {
@@ -3946,6 +4058,7 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
     dives: cached?.dives || {},
     scripts: cached?.scripts || {},
     translations: cached?.translations || {},
+    transcriptMode: state.transcriptMode || "original",
     chat: cached?.chat || [],
     askContext: null,
     study: cached?.study || null,
@@ -3982,7 +4095,8 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
   Object.keys(state.translations || {}).forEach((k) => {
     const raw = state.translations[k];
     const cleaned = cleanZh(raw);
-    if (looksLikeFailedZh(cleaned)) {
+    const src = state.segments[Number(k)]?.text;
+    if (!isRealTranslation(cleaned, src)) {
       delete state.translations[k];
       zhDirty = true;
       return;
@@ -3992,6 +4106,20 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
       zhDirty = true;
     }
   });
+  const uiLang = currentLang();
+  const sample = `${cached?.blocks?.[0]?.title || ""} ${cached?.blocks?.[0]?.summary || ""}`;
+  const staleEn =
+    uiLang.startsWith("zh") &&
+    cached?.blocks?.length &&
+    !/[\u4e00-\u9fff]/.test(sample) &&
+    /[A-Za-z]{4,}/.test(sample);
+  if ((cached?.blocksLang && cached.blocksLang !== uiLang) || (!cached?.blocksLang && staleEn)) {
+    state.blocks = [];
+    state.gist = "";
+    state.dives = {};
+    state.study = null;
+    state.resumeHint = null;
+  }
   if (zhDirty) saveCacheSoon(400);
   if (state.quoteExtracted && !quotes.some((q) => q.videoId === videoId)) {
     state.quoteExtracted = false;
@@ -4026,18 +4154,22 @@ function paintOpenedVideo() {
   });
   paintView(currentView());
   if (state.tabId) ensureContentScript(state.tabId).catch(() => {});
-  if (state.lastSeconds >= 20 && !state.resumeHint?.where && !state.resumeHint?.error) loadResumeHint();
+  if (pendingSeek?.videoId === videoId && Number.isFinite(Number(pendingSeek.seconds))) {
+    state.lastSeconds = Number(pendingSeek.seconds);
+    seek(state.lastSeconds);
+    pendingSeek = null;
+  }
+  if (state.lastSeconds >= 20 && !state.resumeHint?.where && !state.resumeHint?.error && !captionsOnlyMode()) {
+    loadResumeHint();
+  }
   const needZh =
-    state.transcriptMode !== "original" && state.segments.some((_, i) => !state.translations[i]);
+    !captionsOnlyMode() &&
+    state.transcriptMode !== "original" &&
+    state.segments.some((_, i) => !translationAt(i));
   if (needZh) translateAll();
   renderTranslateBar();
   applyPlayRate(playbackRate, false);
   queueBackgroundWork(videoId);
-  if (resolveVocabLevel().id !== "off" && !state.levelScan?.scanned) {
-    setTimeout(() => {
-      if (state.videoId === videoId) scanVideoVocab();
-    }, 1600);
-  }
   flushPendingHotkey();
 }
 
@@ -4049,6 +4181,8 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     return;
   }
   if (!force && loadingVideoId === videoId) return;
+  videoJob += 1;
+  const job = videoJob;
   loadingVideoId = videoId;
   clearQueuedWork();
 
@@ -4060,7 +4194,6 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     const live = liveStore.vb_live?.videoId === videoId ? liveStore.vb_live : null;
     const segs = live?.segments?.length ? live.segments : cached?.segments;
     if (segs?.length) {
-      await stashLearningBricks();
       hydrateVideoState(
         videoId,
         tabTitle,
@@ -4080,9 +4213,9 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     markWatchStage("captions", { videoId, tabId: state.tabId });
     const result = await Promise.race([
       sendToBg({ action: "vbSupadata", videoId }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("打开字幕超时了")), 28000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("打开字幕超时了")), 20000)),
     ]);
-    if (loadingVideoId !== videoId) return;
+    if (job !== videoJob || loadingVideoId !== videoId) return;
     if (!result?.ok) {
       transcriptFailId = videoId;
       transcriptFailAt = Date.now();
@@ -4092,19 +4225,18 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     }
     transcriptFailId = "";
     transcriptFailAt = 0;
-    await stashLearningBricks();
     hydrateVideoState(videoId, tabTitle, result, cached);
     paintOpenedVideo();
     markWatchStage("opened", { videoId, tabId: state.tabId });
     saveCache();
   } catch (error) {
-    if (loadingVideoId !== videoId) return;
+    if (job !== videoJob || loadingVideoId !== videoId) return;
     transcriptFailId = videoId;
     transcriptFailAt = Date.now();
     markWatchStage("caption-error", { videoId, error: String(error?.message || error).slice(0, 240) });
     showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(error?.message || error), true);
   } finally {
-    if (loadingVideoId === videoId) loadingVideoId = null;
+    if (job === videoJob && loadingVideoId === videoId) loadingVideoId = null;
   }
 }
 
@@ -4756,6 +4888,7 @@ async function analyzeBlocks() {
   if (isAnalyzing || !state.segments.length) return;
   isAnalyzing = true;
   const videoId = state.videoId;
+  const job = videoJob;
   setBrickStatus(t("正在拆成知识块…"));
   try {
     const result = await sendToBg({
@@ -4763,8 +4896,9 @@ async function analyzeBlocks() {
       segments: state.segments,
       title: state.title,
       durationSeconds: state.segments.at(-1)?.end || 0,
+      uiLang: currentLang(),
     });
-    if (state.videoId !== videoId) return;
+    if (job !== videoJob || state.videoId !== videoId) return;
     if (!result?.ok) throw new Error(result?.error || t("拆块失败"));
     state.gist = result.gist;
     state.blocks = result.blocks;
@@ -4787,6 +4921,10 @@ function clearQueuedWork() {
 
 function queueBackgroundWork(videoId) {
   clearQueuedWork();
+  if (captionsOnlyMode()) {
+    if (!state.blocks.length) setBrickStatus(t("点「拆」才拆页，不会一打开就花额度。"));
+    return;
+  }
   if (!state.blocks.length) {
     setBrickStatus(t("结构在后台切…"));
     heavyWorkTimer = setTimeout(() => {
@@ -4873,6 +5011,7 @@ async function loadStudyPack({ force = false } = {}) {
   if (state.study && !force) return;
   isStudying = true;
   const videoId = state.videoId;
+  const job = videoJob;
   $("studyBox").innerHTML = `<div class="study-label">学习包</div><p style="color:var(--muted)">正在提炼提纲和问题…</p>`;
   try {
     const result = await sendToBg({
@@ -4887,7 +5026,7 @@ async function loadStudyPack({ force = false } = {}) {
         category: b.category,
       })),
     });
-    if (state.videoId !== videoId) return;
+    if (job !== videoJob || state.videoId !== videoId) return;
     if (!result?.ok) throw new Error(result?.error || t("学习包失败"));
     state.study = {
       spine: result.spine || "",
@@ -6323,8 +6462,8 @@ function renderBrickList() {
   root.innerHTML = "";
   if (!state.blocks.length) {
     root.innerHTML = `<div class="chat-empty">${
-      isAnalyzing ? "结构在后台切，出来后可以一块一块看。" : "知识块出来后，可以逐块拆解，或闭卷讲一遍做费曼检验。"
-    }${isAnalyzing ? "" : `<div class="row-actions"><button class="btn" type="button" id="brickRetry">再拆一次</button></div>`}</div>`;
+      isAnalyzing ? t("正在拆成知识块…") : t("点「拆」才拆页。拆完可以一块一块看，或闭卷讲一遍。")
+    }${isAnalyzing ? "" : `<div class="row-actions"><button class="btn" type="button" id="brickRetry">${t("拆")}</button></div>`}</div>`;
     $("brickRetry")?.addEventListener("click", () => analyzeBlocks());
     return;
   }
@@ -6961,6 +7100,7 @@ async function toggleLoop(i) {
     } else {
       scrollToSeconds(block.start);
       setProgress(i, "learning");
+      scheduleBrick(i);
     }
     updateLoopBtn();
   }
@@ -7705,6 +7845,7 @@ async function deepDive(i) {
     const { ok, error, code, ...dive } = result;
     state.dives[i] = dive;
     setProgress(i, "learning");
+    scheduleBrick(i);
     saveCache();
     renderBrickList();
     renderMaps();
@@ -7848,22 +7989,37 @@ function openWordFromEl(el, row) {
   openWordCard(word, {
     sentence: seg?.text || "",
     seconds: Number(row?.dataset.start) || 0,
+    videoId: state.videoId,
+    videoTitle: state.title,
   });
+}
+
+function decorateTextNodes(html, fn) {
+  const box = document.createElement("div");
+  box.innerHTML = html;
+  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walk.nextNode()) nodes.push(walk.currentNode);
+  for (const node of nodes) {
+    if (!node.nodeValue || node.parentElement?.closest("mark, .vocab-hit, .w-hit")) continue;
+    const next = fn(node.nodeValue);
+    if (next == null || next === node.nodeValue) continue;
+    const wrap = document.createElement("span");
+    wrap.innerHTML = next;
+    node.replaceWith(...wrap.childNodes);
+  }
+  return box.innerHTML;
 }
 
 function markLevelWords(html) {
   const { level } = getDecorateCache();
   if (!level.size) return html;
-  return html
-    .split(/(<[^>]+>)/)
-    .map((chunk) => {
-      if (!chunk || chunk.startsWith("<")) return chunk;
-      return chunk.replace(/\b([A-Za-z][A-Za-z'-]{1,39})\b/g, (word) => {
-        if (!level.has(word.toLowerCase())) return word;
-        return `<span class="w-hit level-hit" data-word="${word.replace(/"/g, "")}" role="button">${word}</span>`;
-      });
-    })
-    .join("");
+  return decorateTextNodes(html, (text) =>
+    text.replace(/\b([A-Za-z][A-Za-z'-]{1,39})\b/g, (word) => {
+      if (!level.has(word.toLowerCase())) return word;
+      return `<span class="w-hit level-hit" data-word="${word.replace(/"/g, "")}" role="button">${word}</span>`;
+    }),
+  );
 }
 
 function decorateText(text) {
@@ -7886,13 +8042,9 @@ function decorateText(text) {
   }
   html += esc(plain.slice(cursor));
   if (cache.termPattern) {
-    html = html
-      .split(/(<[^>]+>)/)
-      .map((chunk) => {
-        if (!chunk || chunk.startsWith("<")) return chunk;
-        return chunk.replace(cache.termPattern, (m) => `<span class="vocab-hit" data-vocab="${m.toLowerCase()}">${m}</span>`);
-      })
-      .join("");
+    html = decorateTextNodes(html, (text) =>
+      text.replace(cache.termPattern, (m) => `<span class="vocab-hit" data-vocab="${m.toLowerCase()}">${m}</span>`),
+    );
   }
   return html;
 }
@@ -7940,9 +8092,9 @@ function buildTranscriptRow(i, { mode, echoes, golds }) {
 }
 
 function zhSlotHtml(i, zh = translationAt(i)) {
-  if (zh) return `<div class="t-zh">${decorateText(zh)}</div>`;
-  if (state.translateFailed?.[i]) {
-    return `<div class="t-zh failed">这句没翻出来 <button class="text-btn t-retry" type="button" data-retryzh="${i}">重试</button></div>`;
+    if (zh) return `<div class="t-zh">${decorateText(zh)}</div>`;
+  if (state.translateFailed?.[i] || (state.transcriptMode === "zh" && !isTranslating)) {
+    return `<div class="t-zh failed">${t("这句没翻出来")} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
   }
   return `<div class="t-zh pending"><span class="zh-skel" aria-hidden="true"></span></div>`;
 }
@@ -8115,9 +8267,10 @@ async function translateAll() {
   isTranslating = true;
   if (!state.translateFailed) state.translateFailed = {};
   const videoId = state.videoId;
+  const job = videoJob;
   renderTranslateBar();
   try {
-    while (state.videoId === videoId && state.transcriptMode !== "original") {
+    while (job === videoJob && state.videoId === videoId && state.transcriptMode !== "original") {
       const pending = [];
       for (let i = 0; i < state.segments.length && pending.length < 40; i++) {
         if (!translationAt(i) && !state.translateFailed[i]) pending.push(i);
@@ -8127,7 +8280,7 @@ async function translateAll() {
         action: "vbTranslate",
         lines: pending.map((i) => state.segments[i].text),
       });
-      if (state.videoId !== videoId) break;
+      if (job !== videoJob || state.videoId !== videoId) break;
       if (!result?.ok) {
         pending.forEach((i) => {
           if (!translationAt(i)) {
@@ -8141,7 +8294,7 @@ async function translateAll() {
       }
       pending.forEach((i, k) => {
         const zh = cleanZh(result.translations[k] || "");
-        if (looksLikeFailedZh(zh) || !zh) {
+        if (!isRealTranslation(zh, state.segments[i]?.text)) {
           delete state.translations[i];
           state.translateFailed[i] = true;
         } else {
@@ -8156,7 +8309,7 @@ async function translateAll() {
     }
   } finally {
     isTranslating = false;
-    if (state.videoId === videoId) {
+    if (job === videoJob && state.videoId === videoId) {
       renderTranslateBar();
       saveCache();
     }
@@ -8736,6 +8889,17 @@ async function addVocabMany(items) {
     created.push(row);
     added += 1;
   }
+  const needDef = [...created, ...linkedIds.map((id) => vocab.find((v) => v.id === id)).filter(Boolean)];
+  for (const row of needDef) {
+    if (row.definition?.senses?.[0]?.zh || row.definition?.meaning) continue;
+    const result = await sendToBg({
+      action: "vbDefine",
+      word: row.word,
+      sentence: row.sentence || "",
+      videoTitle: row.videoTitle || "",
+    }).catch(() => null);
+    if (result?.ok && result.definition) row.definition = result.definition;
+  }
   const changed = added + linked;
   if (changed) {
     if (vocab.length > 500) vocab.length = 500;
@@ -8850,9 +9014,18 @@ function applyVocabJump(word, target, hits, extra = {}) {
 }
 
 function jumpVocabHit(word, seconds, extra) {
+  const destId = String(extra?.entry?.videoId || extra?.videoId || "").trim();
+  if (destId && destId !== state.videoId) {
+    goToVideo(destId, seconds);
+    return;
+  }
   const hits = vocabHits(word);
   if (!hits.length) {
-    if (Number.isFinite(seconds)) {
+    if (destId && destId !== state.videoId) {
+      goToVideo(destId, seconds);
+      return;
+    }
+    if (Number.isFinite(seconds) && (!destId || destId === state.videoId)) {
       peekSeek(seconds, { word, kind: jumpKindFromExtra(extra), entry: extra?.entry });
       return;
     }
@@ -9821,7 +9994,10 @@ function showWordCard(word, entry = {}) {
       await removeVocabWord(now.id);
       $("wordSave").textContent = t("存入生词本");
     } else {
+      const existingDef = vocab.find((v) => v.word.toLowerCase() === String(word).toLowerCase())?.definition;
       await addVocab(word, entry.sentence, entry.seconds);
+      const row = vocab.find((v) => v.word.toLowerCase() === String(word).toLowerCase());
+      if (row && existingDef && !row.definition) row.definition = existingDef;
       $("wordSave").textContent = vocabByWord(word) ? t("从本里去掉") : t("存入生词本");
     }
   });
@@ -10894,12 +11070,15 @@ function uncardedVocab() {
 function vocabCardFrom(v) {
   const word = String(v.word || "").trim();
   const sentence = String(preferredVocabSource(v)?.sentence || v.sentence || "");
+  const ipa = v.definition?.phonetic || "";
   const zh = v.definition?.senses?.[0]?.zh || v.definition?.meaning || "";
+  const usage = v.definition?.usage || v.definition?.examples?.[0]?.en || "";
+  const back = [ipa, zh, usage].filter(Boolean).join(" · ") || t("还没查到释义，点开词卡再查");
   const pattern = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   if (sentence && pattern.test(sentence)) {
-    return { front: sentence.replace(pattern, "____"), back: word, hint: zh };
+    return { front: sentence.replace(pattern, "____"), back, hint: zh };
   }
-  return { front: `${word} 是什么意思？`, back: zh || sentence || "回原句确认一下", hint: "" };
+  return { front: `${word} 是什么意思？`, back, hint: sentence || "" };
 }
 
 async function makeVocabCards(list) {
@@ -11396,15 +11575,40 @@ async function pollTickWork() {
     return;
   }
   const hrefId = tabVideoId(tab) || videoIdFromHref(tabHref(tab));
+  const watchPage = isWatchHost(tabHref(tab));
   const ready = await ensureContentScript(tab.id);
   if (isLooping() && ready) applyLoopToPage();
   const info = ready ? (await sendToTab({ type: "VB_VIDEO_INFO" })) || {} : {};
   if (ready && Number(info.rate) > 0 && Math.abs(Number(info.rate) - playbackRate) > 0.04) {
     sendToTab({ type: "VB_RATE", rate: playbackRate });
   }
+  if (info.unavailable) {
+    takeIncomingWatch({
+      videoId: hrefId || "",
+      title: info.title || tab.title || "",
+      tabId: tab.id,
+      url: tab.url || tabHref(tab),
+      unavailable: true,
+      watchPage,
+      activeWatch: Boolean(tab.active),
+      source: "poll",
+    });
+    return;
+  }
   const videoId =
     pickPollVideoId(hrefId, info) || (await withTimeout(probePageVideoId(tab.id), 800));
   if (!videoId) {
+    if (watchPage && tab.active) {
+      takeIncomingWatch({
+        title: info.title || tab.title || "",
+        tabId: tab.id,
+        url: tab.url || tabHref(tab),
+        watchPage: true,
+        activeWatch: true,
+        source: "poll",
+      });
+      return;
+    }
     if (canShowIdle()) await showIdleWatchState(t("这页还没认出正在播的视频。点一下播放，或把链接贴在下面。"));
     return;
   }
@@ -11414,15 +11618,13 @@ async function pollTickWork() {
     tabId: tab.id,
     url: tab.url || tabHref(tab),
     ad: Boolean(info.ad),
+    watchPage,
+    activeWatch: Boolean(tab.active),
     source: "poll",
   });
   if (videoId !== state.videoId) return;
   if (Number.isFinite(info.currentTime)) {
     state.lastSeconds = info.currentTime;
-    const at = state.blocks.findIndex(
-      (b) => info.currentTime >= b.start && info.currentTime < b.end,
-    );
-    if (at >= 0 && blockProgress(at) === "fresh") setProgress(at, "learning");
   }
 }
 
@@ -11841,6 +12043,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("followBtn")?.addEventListener("click", () => {
     followPlayback = !followPlayback;
+    followPausedByUser = false;
     if (followPlayback) {
       lastUserScrollAt = 0;
       lastFollowedStart = -1;
@@ -11854,13 +12057,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.preventDefault();
     const seconds = parseJumpInput($("jumpInput").value);
     if (seconds == null) {
-      flashHint("时间写成 12:30 或秒数。");
+      flashHint("时间写成 1:30:00、12:30 或秒数。");
       return;
     }
     seek(seconds);
   });
-  document.addEventListener("wheel", pauseFollowFromUser, { passive: true });
-  document.addEventListener("touchmove", pauseFollowFromUser, { passive: true });
+  $("transcriptBox")?.addEventListener("wheel", pauseFollowFromUser, { passive: true });
+  $("transcriptBox")?.addEventListener("touchmove", pauseFollowFromUser, { passive: true });
   updateFollowBtn();
 
   $("modeOriginal").addEventListener("click", () => setTranscriptMode("original"));

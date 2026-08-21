@@ -45,8 +45,13 @@ function youtubeIdFromHref(url) {
   const v = url.searchParams.get("v");
   if (v) return v;
   const parts = url.pathname.split("/").filter(Boolean);
-  if (["shorts", "live", "embed", "v", "e"].includes(parts[0])) return parts[1] || null;
-  if (url.hostname.includes("youtu.be")) return parts[0] || null;
+  const head = String(parts[0] || "").toLowerCase();
+  if (["shorts", "live", "embed", "v", "e", "watch"].includes(head)) return parts[1] || null;
+  const host = String(url.hostname || "").toLowerCase();
+  if (host === "youtu.be" || host.endsWith(".youtu.be")) return parts[0] || null;
+  if (host === "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com")) {
+    return ["embed", "live", "shorts", "watch"].includes(head) ? parts[1] || null : parts[0] || null;
+  }
   return null;
 }
 
@@ -124,8 +129,9 @@ function markFaceUrl(id) {
 }
 
 function watchAdoptDecision(info, ctx) {
+  if (info?.unavailable || info?.unreadable) return "clear";
   const videoId = String(info?.videoId || "");
-  if (!videoId) return "skip-empty";
+  if (!videoId) return info?.watchPage ? "clear" : "skip-empty";
   if (info?.ad) return "skip-ad";
   if (ctx?.loadingVideoId && videoId === String(ctx.loadingVideoId)) return "skip-loading";
   const opened = Boolean(ctx?.videoId && Number(ctx.segments) > 0);
@@ -134,9 +140,41 @@ function watchAdoptDecision(info, ctx) {
   if (force) return "open";
   if (opened) {
     if (info.tabId && ctx.tabId && Number(info.tabId) === Number(ctx.tabId)) return "open";
+    if (info.activeWatch) return "open";
     return "skip-opened";
   }
   return "open";
+}
+
+function formatClock(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function parseClockInput(raw) {
+  const text = String(raw || "").trim().replace(/：/g, ":");
+  if (!text) return null;
+  const parts = text.match(/^(\d{1,3}):([0-5]?\d)(?::([0-5]?\d))?$/);
+  if (parts) {
+    if (parts[3] != null) return Number(parts[1]) * 3600 + Number(parts[2]) * 60 + Number(parts[3]);
+    return Number(parts[1]) * 60 + Number(parts[2]);
+  }
+  const sec = Number(text);
+  return Number.isFinite(sec) && sec >= 0 ? sec : null;
+}
+
+function sameAsSource(zh, en) {
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "");
+  const a = norm(zh);
+  const b = norm(en);
+  return Boolean(a && b && a === b);
 }
 
 function watchUrl(videoId, seconds) {
@@ -298,19 +336,20 @@ function md5hex(src) {
     .join("");
 }
 
-const WBI_MIXIN = [
+var WBI_MIXIN = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41,
   13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34,
   44, 52,
 ];
 
-let wbiKey = { mixin: "", at: 0 };
+var wbiKey = { mixin: "", at: 0 };
 
 async function biliJson(url) {
   const res = await fetch(url, {
     credentials: "include",
     headers: { Referer: "https://www.bilibili.com/" },
   });
+  if (res.status === 412) throw new Error("B 站拒绝了这次访问，稍后重试");
   if (!res.ok) throw new Error(`读页面失败（${res.status}）`);
   return res.json();
 }
@@ -396,3 +435,6 @@ async function fetchBiliTranscript(videoId) {
   }
   return finishBiliTracks(tracks, title);
 }
+
+if (!globalThis.__KAIZEN_CS__) globalThis.__KAIZEN_CS__ = {};
+globalThis.__KAIZEN_CS__.site = 1;
