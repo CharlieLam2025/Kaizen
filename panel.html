@@ -3,16 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>拆砖</title>
+  <title>Kaizen</title>
   <link rel="stylesheet" href="panel.css" />
 </head>
 <body>
   <!-- 首次设置：没配齐 Key 时占满全屏，不藏在齿轮后面 -->
   <section id="setupGate" class="setup" hidden>
-    <div class="setup-mark">拆砖</div>
-    <h1 id="setupTitle">先花两分钟配好钥匙</h1>
-    <p class="setup-lead" id="setupLead">
-      拆砖用你自己的账号，不提供额度。两个 Key 都填上，才能读字幕、拆知识、查生词。
+    <div class="field lang-field">
+      <span data-i18n="界面语言">界面语言</span>
+      <div id="setupUiLang" class="lang-picker lang-picker-chips" data-lang-picker></div>
+    </div>
+    <img class="totem" src="icons/icon128.png" alt="Kaizen" />
+    <p class="setup-kana">Kaizen · 改善</p>
+    <h1 id="setupTitle" data-i18n="精进自己">精进自己</h1>
+    <div class="idea-block">
+      <p><span class="idea-word">改</span>，看见不够，就动手改。<span class="idea-word">善</span>，改完之后，往更好去。</p>
+      <p>两个字合在一起，叫持续精进：今天比昨天清楚一点，明天再清楚一点。</p>
+    </div>
+    <p class="setup-lead" id="setupLead" data-i18n="DeepSeek 用来拆解和查词。字幕优先用视频自己的；YouTube 没有原生字幕时再填 Supadata。">
+      DeepSeek 用来拆解和查词。字幕优先用视频自己的；YouTube 没有原生字幕时再填 Supadata。
     </p>
 
     <div class="setup-steps">
@@ -22,7 +31,7 @@
           <h2>DeepSeek · 拆解和查词</h2>
           <ol>
             <li>打开 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">API Keys 页面</a>，没有账号会先让你注册。</li>
-            <li>点 <em>Create new API key</em>，名字填「拆砖」即可。</li>
+            <li>点 <em>Create new API key</em>，名字填「Kaizen」即可。</li>
             <li>立刻复制完整 Key（一般只显示一次）。</li>
           </ol>
           <label class="field">
@@ -34,7 +43,8 @@
       <div class="setup-card">
         <div class="setup-n">2</div>
         <div>
-          <h2>Supadata · 字幕</h2>
+          <h2>Supadata · 字幕（选填）</h2>
+          <p class="setup-lead" style="margin-bottom:8px">YouTube / B 站自己有字幕时可以不填。没有原生字幕，再用它补。</p>
           <ol>
             <li>打开 <a href="https://dash.supadata.ai/auth/sign-up" target="_blank" rel="noreferrer">Supadata 注册页</a>，走完新手引导。</li>
             <li>引导里会自动生成 Key，之后可在 <a href="https://dash.supadata.ai/" target="_blank" rel="noreferrer">控制台</a> 查找。</li>
@@ -51,7 +61,7 @@
       <div class="setup-n">3</div>
       <div>
         <h2>DeepSeek 用哪个</h2>
-        <p class="setup-lead" style="margin-bottom:8px">两个都能用。Flash 快、便宜；Pro 更稳、更适合拆解。</p>
+        <p class="setup-lead" style="margin-bottom:8px">不确定就用默认，之后随时能改。Flash 快、便宜；Pro 更稳，适合拆解。</p>
         <input type="hidden" id="setupModel" value="deepseek-v4-flash" />
         <input type="hidden" id="setupDiveModel" value="deepseek-v4-pro" />
         <div class="model-pick" id="setupModelPick">
@@ -78,90 +88,209 @@
       </div>
     </div>
 
-    <button id="setupSave" class="btn btn-primary btn-lg">保存并开始</button>
+    <div class="setup-card">
+      <div class="setup-n">4</div>
+      <div>
+        <h2>英语大概到哪</h2>
+        <p class="setup-lead" style="margin-bottom:8px">用来从字幕里筛你可能还不熟的词。设了之后，打开视频会先给一份生词库，可以先过一遍再看。不是官方考纲，先不设也可以。</p>
+        <div class="band-toggle" id="setupVocabBand"></div>
+        <label class="field" id="setupVocabScoreWrap" hidden>
+          <span id="setupVocabScoreLabel">总分（选填）</span>
+          <input type="text" id="setupVocabScore" inputmode="decimal" placeholder="例如 6.5" autocomplete="off" />
+        </label>
+        <button id="setupVocabTest" class="text-btn" type="button" data-i18n="测一下词汇量">测一下词汇量</button>
+      </div>
+    </div>
+
+    <button id="setupSave" class="btn btn-primary btn-lg" data-i18n="保存并开始">保存并开始</button>
     <p class="setup-foot">Key 只存在这台电脑的浏览器里。DeepSeek 说明：<a href="https://api-docs.deepseek.com/" target="_blank" rel="noreferrer">api-docs.deepseek.com</a> · Supadata 定价：<a href="https://supadata.ai/pricing" target="_blank" rel="noreferrer">supadata.ai/pricing</a></p>
+    <p class="made-by">Made by CharlieLam<br><span data-i18n="微信">微信</span> <button type="button" class="made-wechat" data-copy-wechat>942966642</button></p>
+    <details class="author-note">
+      <summary data-i18n="作者的话">作者的话</summary>
+      <div class="author-note-body">
+        <p data-i18n="Kaizen 的意思是改善。改是看见自己的不足，就动手改。善是改完之后，往更好的方向去。">Kaizen 的意思是改善。改是看见自己的不足，就动手改。善是改完之后，往更好的方向去。</p>
+        <p data-i18n="念作 kai-zen。这个词本来是工厂和公司里的说法：不指望一次巨大的颠覆，而是每个人每天在手边的事上改一点，攒下来就是质的变化。">念作 kai-zen。这个词本来是工厂和公司里的说法：不指望一次巨大的颠覆，而是每个人每天在手边的事上改一点，攒下来就是质的变化。</p>
+        <p data-i18n="我们看了太多内容，更多是在囤积，很少真正内化成自己的东西。">我们看了太多内容，更多是在囤积，很少真正内化成自己的东西。</p>
+        <p data-i18n="做这个插件，是希望自己能打破语言的墙，也把一些深的、偏长的内容，拆成更容易懂的短块。">做这个插件，是希望自己能打破语言的墙，也把一些深的、偏长的内容，拆成更容易懂的短块。</p>
+        <p data-i18n="希望大家不断地精进自己、改善自己。这个工具有什么好的建议，可以留言，也可以微信找我。">希望大家不断地精进自己、改善自己。这个工具有什么好的建议，可以留言，也可以微信找我。</p>
+      </div>
+    </details>
   </section>
 
   <!-- 功能小教程 -->
   <section id="tutorial" class="tutorial" hidden>
     <div class="tutorial-card">
-      <div class="tutorial-kicker" id="tutKicker">1 / 5</div>
-      <h2 id="tutTitle">把字幕当成一本书</h2>
-      <p id="tutBody">双语对照是主界面。像微信读书一样，在句子上划线、写笔记、查生词。点左边时间就能跳到那一秒。</p>
+      <div class="tutorial-kicker" id="tutKicker">理念</div>
+      <h2 id="tutTitle">这两个字</h2>
+      <p id="tutBody">Kaizen 的意思是改善。改是看见自己的不足，就动手改。善是改完之后，往更好的方向去。念作 kai-zen。这个词本来是工厂和公司里的说法：不指望一次巨大的颠覆，而是每个人每天在手边的事上改一点，攒下来就是质的变化。</p>
       <div class="tutorial-dots" id="tutDots"></div>
       <div class="tutorial-actions">
-        <button id="tutSkip" class="text-btn" type="button">跳过</button>
+        <button id="tutSkip" class="text-btn" type="button" data-i18n="跳过">跳过</button>
         <div class="right">
-          <button id="tutPrev" class="btn" type="button" hidden>上一步</button>
-          <button id="tutNext" class="btn btn-primary" type="button">下一步</button>
+          <button id="tutPrev" class="btn" type="button" hidden data-i18n="上一步">上一步</button>
+          <button id="tutNext" class="btn btn-primary" type="button" data-i18n="下一步">下一步</button>
         </div>
       </div>
     </div>
   </section>
 
   <header class="topbar">
-    <div class="brand">拆<span>砖</span></div>
+    <div class="brand">Kai<span>zen</span></div>
     <div class="top-actions">
-      <div class="seg-toggle model-switch" id="modelSwitch" title="DeepSeek 日常模型">
+      <div class="seg-toggle model-switch" id="modelSwitch" data-i18n-title="Flash 快，Pro 更稳" title="Flash 快，Pro 更稳">
         <button type="button" class="seg-btn" data-m="deepseek-v4-flash">Flash</button>
         <button type="button" class="seg-btn" data-m="deepseek-v4-pro">Pro</button>
       </div>
-      <button id="exportTopBtn" class="text-btn" type="button">导出</button>
-      <button id="moreBtn" class="icon-btn" type="button" title="更多" aria-expanded="false">···</button>
+      <button id="vocabLevelBtn" class="ghost-chip vocab-chip need-set" type="button" data-i18n-title="按英语水平筛这篇的生词" title="按英语水平筛这篇的生词">设词汇水平</button>
+      <button id="reviewTopBtn" class="text-btn" type="button" data-i18n-title="做成的复习卡在这里" title="做成的复习卡在这里"><span data-i18n="复习">复习</span><span id="reviewTopBadge" class="tab-badge" hidden></span></button>
+      <button id="exportTopBtn" class="text-btn" type="button" data-i18n="导出">导出</button>
+      <button id="settingsTopBtn" class="text-btn" type="button" data-i18n="设置">设置</button>
+      <button id="themeBtn" class="icon-btn" type="button" data-i18n-title="外观" title="外观">◐</button>
+      <button id="moreBtn" class="icon-btn" type="button" data-i18n-title="更多" title="更多" aria-expanded="false">···</button>
     </div>
   </header>
+  <section id="themePop" class="theme-pop drawer" hidden></section>
+  <div id="vocabTestModal" class="modal" hidden></div>
   <div id="moreMenu" class="more-menu" hidden>
-    <button id="tutReplay" type="button">教程</button>
-    <button id="settingsBtn" type="button">设置</button>
+    <button id="tutReplay" type="button" data-i18n="教程">教程</button>
+    <button id="settingsBtn" type="button" data-i18n="设置">设置</button>
+    <button id="authorBtn" type="button" data-i18n="作者">作者</button>
+    <button id="feedbackBtn" type="button" data-i18n="留言">留言</button>
   </div>
 
-  <section id="settingsDrawer" class="drawer" hidden></section>
+  <section id="vocabLevelPop" class="vocab-pop drawer" hidden>
+    <p class="setup-lead">英语大概到哪。设完后，打开视频会先筛可能还不熟的词，给你一份生词库，可以先过一遍再看。</p>
+    <div class="band-toggle" id="popVocabBand"></div>
+    <label class="field" id="popVocabScoreWrap" hidden>
+      <span id="popVocabScoreLabel">总分（选填）</span>
+      <input type="text" id="popVocabScore" inputmode="decimal" placeholder="例如 6.5" autocomplete="off" />
+    </label>
+    <button id="popVocabTest" class="btn" type="button" data-i18n="测一下词汇量">测一下词汇量</button>
+    <p class="setup-lead" id="popVocabHint" style="margin:8px 0 0">点一下就保存。也可以测 20 个词，估一个更准的量。不是官方考纲。</p>
+  </section>
+
+  <section id="settingsDrawer" class="settings-page" hidden></section>
 
   <section id="stateBox" class="state-box">
-    <div class="state-mark" id="stateEmoji">拆</div>
-    <div class="state-title" id="stateTitle">打开一个 YouTube 视频</div>
-    <div class="state-sub" id="stateSub">配好钥匙之后，打开任意有字幕的视频，阅读器会自动铺开。</div>
-    <div class="state-actions">
-      <button id="stateRetry" class="btn" hidden>重试</button>
-      <button id="stateReview" class="btn" hidden>先复习到期的卡</button>
+    <img class="totem" src="icons/icon128.png" alt="Kaizen" />
+    <div class="state-mark" id="stateEmoji" hidden></div>
+    <div class="state-title" id="stateTitle" data-i18n="改善">改善</div>
+    <div class="idea-block" id="ideaBlock">
+      <p data-i18n="看视频很容易滑过去。在这里停一下。">看视频很容易滑过去。在这里停一下。</p>
     </div>
+    <div class="state-sub" id="stateSub" data-i18n="打开一支有字幕的 YouTube 或 B 站，就开始。">打开一支有字幕的 YouTube 或 B 站，就开始。</div>
+    <div id="stateOpen" class="state-open">
+      <p class="state-open-kicker" id="stateOpenKicker" data-i18n="如果已经打开了视频，点一下那一页，或把链接贴在下面。">如果已经打开了视频，点一下那一页，或把链接贴在下面。</p>
+      <div id="stateTabList" class="state-tab-list"></div>
+      <label class="field">
+        <span data-i18n="或粘贴视频链接">或粘贴视频链接</span>
+        <input id="statePaste" type="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" />
+      </label>
+      <div class="state-open-actions">
+        <button id="statePasteGo" class="btn" type="button" data-i18n="打开这支">打开这支</button>
+        <button id="stateFindAgain" class="text-btn" type="button" data-i18n="再找一次">再找一次</button>
+      </div>
+    </div>
+    <div id="stateVocab" class="state-vocab">
+      <p class="state-vocab-kicker" data-i18n="看视频前，先设英语大概到哪">看视频前，先设英语大概到哪</p>
+      <p class="setup-lead" style="margin:0 0 8px" data-i18n="设了之后，打开视频会先给一份可能生词库，可以先过一遍再看。">设了之后，打开视频会先给一份可能生词库，可以先过一遍再看。</p>
+      <div class="band-toggle" id="stateVocabBand"></div>
+      <label class="field" id="stateVocabScoreWrap" hidden>
+        <span id="stateVocabScoreLabel">总分（选填）</span>
+        <input type="text" id="stateVocabScore" inputmode="decimal" placeholder="例如 6.5" autocomplete="off" />
+      </label>
+    </div>
+    <div class="state-actions">
+      <button id="stateRetry" class="btn" hidden data-i18n="重试">重试</button>
+      <button id="stateReview" class="btn" hidden data-i18n="先复习到期的卡">先复习到期的卡</button>
+    </div>
+    <p class="made-by" id="stateBy">Made by CharlieLam<br><span data-i18n="微信">微信</span> <button type="button" class="made-wechat" data-copy-wechat>942966642</button></p>
+    <details class="author-note" id="stateNote">
+      <summary data-i18n="作者的话">作者的话</summary>
+      <div class="author-note-body">
+        <p data-i18n="Kaizen 的意思是改善。改是看见自己的不足，就动手改。善是改完之后，往更好的方向去。">Kaizen 的意思是改善。改是看见自己的不足，就动手改。善是改完之后，往更好的方向去。</p>
+        <p data-i18n="念作 kai-zen。这个词本来是工厂和公司里的说法：不指望一次巨大的颠覆，而是每个人每天在手边的事上改一点，攒下来就是质的变化。">念作 kai-zen。这个词本来是工厂和公司里的说法：不指望一次巨大的颠覆，而是每个人每天在手边的事上改一点，攒下来就是质的变化。</p>
+        <p data-i18n="我们看了太多内容，更多是在囤积，很少真正内化成自己的东西。">我们看了太多内容，更多是在囤积，很少真正内化成自己的东西。</p>
+        <p data-i18n="做这个插件，是希望自己能打破语言的墙，也把一些深的、偏长的内容，拆成更容易懂的短块。">做这个插件，是希望自己能打破语言的墙，也把一些深的、偏长的内容，拆成更容易懂的短块。</p>
+        <p data-i18n="希望大家不断地精进自己、改善自己。这个工具有什么好的建议，可以留言，也可以微信找我。">希望大家不断地精进自己、改善自己。这个工具有什么好的建议，可以留言，也可以微信找我。</p>
+      </div>
+    </details>
   </section>
 
   <main id="mainBox" hidden>
     <div class="video-title" id="videoTitle"></div>
-    <div class="progress-meter" id="progressMeter"></div>
-
+    <p class="map-help" id="flashHint" hidden></p>
     <nav class="views">
-      <button class="view-tab active" data-view="read">阅读</button>
-      <button class="view-tab" data-view="bricks">拆砖</button>
-      <button class="view-tab" data-view="maps">图谱</button>
-      <button class="view-tab" data-view="ask">提问</button>
-      <button class="view-tab" data-view="notes">笔记</button>
-      <button class="view-tab" data-view="shelf">库</button>
-      <button class="view-tab" data-view="review">复习<span id="reviewBadge" class="tab-badge" hidden></span></button>
+      <button class="view-tab active" data-view="read" data-i18n="阅读">阅读</button>
+      <button class="view-tab" data-view="bricks" data-i18n="拆页">拆页</button>
+      <button class="view-tab" data-view="maps" data-i18n="图谱">图谱</button>
+      <button class="view-tab" data-view="ask" data-i18n="提问">提问</button>
+      <button class="view-tab" data-view="notes" data-i18n="笔记">笔记</button>
+      <button class="view-tab" data-view="vocab"><span data-i18n="生词">生词</span><span id="vocabBadge" class="tab-badge" hidden></span></button>
+      <button class="view-tab" data-view="shelf" data-i18n="库">库</button>
+      <button class="view-tab" data-view="review"><span data-i18n="复习">复习</span><span id="reviewBadge" class="tab-badge" hidden></span></button>
+      <button class="view-tab" data-view="settings" data-i18n="设置">设置</button>
     </nav>
+    <div id="markRail" class="mark-rail" hidden>
+      <div class="mark-head">
+        <span class="mark-kicker" data-i18n="书签">书签</span>
+        <button id="markFaceBtn" class="mark-face-btn" type="button" data-i18n-title="换书签样子" title="换书签样子"></button>
+        <button id="markDrop" class="ghost-chip" type="button" data-i18n="夹在这里">夹在这里</button>
+        <span id="markClock" class="note-meta"></span>
+      </div>
+      <div class="mark-track" id="markTrack">
+        <i class="mark-fill" id="markFill"></i>
+        <div id="markPins"></div>
+        <button class="mark-walker" id="markWalker" type="button" data-i18n-title="换书签样子" title="换书签样子"></button>
+      </div>
+      <div id="markCard" class="mark-card" hidden></div>
+      <div id="markList" class="mark-list"></div>
+      <div id="markFacePop" class="mark-face-pop" hidden></div>
+      <input id="markFaceFile" type="file" accept="image/*" hidden />
+    </div>
+    <div class="progress-meter" id="progressMeter"></div>
 
     <section class="view active" data-view="read">
       <div class="reader-tools">
-        <div class="seg-toggle read-lang" role="group" aria-label="字幕语言">
-          <button id="modeOriginal" class="seg-btn">原文</button>
-          <button id="modeBilingual" class="seg-btn active">双语</button>
-          <button id="modeZh" class="seg-btn">中文</button>
+        <div class="seg-toggle read-lang" role="group" data-i18n-aria="字幕语言" aria-label="字幕语言">
+          <button id="modeOriginal" class="seg-btn" data-i18n="原文">原文</button>
+          <button id="modeBilingual" class="seg-btn active" data-i18n="双语">双语</button>
+          <button id="modeZh" class="seg-btn" data-i18n="中文">中文</button>
         </div>
+        <button id="copyTranscriptBtn" class="ghost-chip" type="button" data-i18n="复制全文">复制全文</button>
         <div class="reader-chrome">
-        <button id="followBtn" class="ghost-chip active" type="button">跟随</button>
+        <label class="rate-pick">
+          <select id="rateSelect" data-i18n-aria="播放倍速" aria-label="播放倍速">
+            <option value="0.5">0.5×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <button id="followBtn" class="ghost-chip active" type="button" data-i18n="跟随">跟随</button>
+        <button id="loopLineBtn" class="ghost-chip" type="button" data-i18n-title="再按 A 或 Esc 可停" title="再按 A 或 Esc 可停" data-i18n="循环这句">循环这句</button>
+        <button id="shadowBtn" class="ghost-chip" type="button" data-i18n-title="划一段再跟读。会自动降速，听完空一拍。" title="划一段再跟读。会自动降速，听完空一拍。" data-i18n="跟读">跟读</button>
         <form id="jumpForm" class="jump-form">
-          <input id="jumpInput" type="text" inputmode="numeric" placeholder="12:30" aria-label="跳到时间" />
+          <input id="jumpInput" type="text" inputmode="numeric" placeholder="12:30" data-i18n-aria="跳到时间" aria-label="跳到时间" />
+          <button type="submit" class="text-btn" data-i18n-title="跳到这个时间" title="跳到这个时间" data-i18n="跳">跳</button>
         </form>
-        <button id="typeSmaller" class="icon-btn" type="button" title="字号减小">A−</button>
-        <button id="typeBigger" class="icon-btn" type="button" title="字号增大">A+</button>
-        <button id="focusBtn" class="ghost-chip" type="button" title="藏起工具条，只留正文">沉浸</button>
+        <button id="typeSmaller" class="icon-btn" type="button" data-i18n-title="字号减小" title="字号减小">A−</button>
+        <button id="typeBigger" class="icon-btn" type="button" data-i18n-title="字号增大" title="字号增大">A+</button>
+        <button id="focusBtn" class="ghost-chip" type="button" data-i18n-title="藏起工具条，只留正文" title="藏起工具条，只留正文" data-i18n="沉浸">沉浸</button>
         </div>
       </div>
       <div class="reader-tools reader-find">
-        <input id="readerSearch" class="reader-search" type="search" placeholder="在这篇里找…" />
+        <input id="readerSearch" class="reader-search" type="search" data-i18n-placeholder="在这篇里找…" placeholder="在这篇里找…" />
+        <button id="levelScanBtn" class="ghost-chip" type="button" hidden>按水平筛生词</button>
       </div>
+      <div id="translateBar" class="translate-bar" hidden></div>
+      <div id="loopBanner" class="loop-banner" hidden></div>
+      <div id="vocabPreview" class="vocab-preview" hidden></div>
       <div id="resumeBanner" class="resume" hidden></div>
+      <div id="echoBox" class="echo-box" hidden></div>
+      <section id="quoteRail" class="quote-rail" hidden></section>
       <div id="searchHits" class="search-hits" hidden></div>
       <article id="transcriptBox" class="reader"></article>
     </section>
@@ -172,10 +301,10 @@
       <div class="chip-rail" id="brickBar"></div>
       <div class="bricks-toolbar">
         <div class="notes-tabs" id="brickFilter">
-          <button class="seg-btn active" data-progress="all">全部</button>
-          <button class="seg-btn" data-progress="fresh">未开始</button>
-          <button class="seg-btn" data-progress="learning">进行中</button>
-          <button class="seg-btn" data-progress="done">已学会</button>
+          <button class="seg-btn active" data-progress="all" data-i18n="全部">全部</button>
+          <button class="seg-btn" data-progress="fresh" data-i18n="未开始">未开始</button>
+          <button class="seg-btn" data-progress="learning" data-i18n="进行中">进行中</button>
+          <button class="seg-btn" data-progress="done" data-i18n="已学会">已学会</button>
         </div>
         <p class="brick-status" id="brickStatus" hidden></p>
       </div>
@@ -183,101 +312,187 @@
     </section>
 
     <section class="view" data-view="maps">
-      <div class="notes-tabs map-tabs">
-        <button class="seg-btn active" data-map="mind">思维导图</button>
-        <button class="seg-btn" data-map="concept">概念图</button>
-        <button class="seg-btn" data-map="arg">论证图</button>
-        <button class="seg-btn" data-map="time">时间线</button>
-        <button class="seg-btn" data-map="atlas">跨视频</button>
+      <div class="notes-tabs map-tabs map-tabs-all">
+        <button class="seg-btn active" data-map="concept" data-i18n="本支">本支</button>
+        <button class="seg-btn" data-map="atlas" data-i18n="全局">全局</button>
+        <button class="seg-btn" data-map="arg" data-i18n="论证图">论证图</button>
+        <button class="seg-btn" data-map="novak" data-i18n="层级图">层级图</button>
+        <button class="seg-btn" data-map="mind" data-i18n="思维导图">思维导图</button>
+        <button class="seg-btn" data-map="time" data-i18n="时间线">时间线</button>
       </div>
-      <p class="map-help" id="mapHelp">点节点可跳转、展开或打开对应知识块。</p>
+      <p class="map-help" id="mapHelp" data-i18n="点节点可跳转、展开或打开对应知识块。">点节点可跳转、展开或打开对应知识块。</p>
       <div id="mapBox" class="map-box"></div>
     </section>
 
     <section class="view" data-view="ask">
       <div class="ask-context" id="askContext"></div>
       <div class="chat-box" id="chatBox">
-        <div class="chat-empty" id="chatEmpty">问整支视频，或先在阅读里划一句话再来问。答案里的时间能点。</div>
+        <div class="chat-empty" id="chatEmpty" data-i18n="先问主张、某一句，或你正看到的地方。答案里的时间能点。">先问主张、某一句，或你正看到的地方。答案里的时间能点。</div>
       </div>
       <form class="ask-form" id="askForm">
-        <textarea id="askInput" rows="2" placeholder="问这支视频… Enter 发送"></textarea>
-        <button type="submit" class="btn btn-primary" id="askSend">发送</button>
+        <textarea id="askInput" rows="2" data-i18n-placeholder="他在主张什么？这句话什么意思？ Enter 发送" placeholder="他在主张什么？这句话什么意思？ Enter 发送"></textarea>
+        <button type="submit" class="btn btn-primary" id="askSend" data-i18n="发送">发送</button>
       </form>
     </section>
 
     <section class="view" data-view="notes">
       <div class="notes-toolbar">
         <div class="notes-tabs">
-          <button class="seg-btn active" data-notes="highlights">划线</button>
-          <button class="seg-btn" data-notes="quotes">金句</button>
-          <button class="seg-btn" data-notes="memos">笔记</button>
-          <button class="seg-btn" data-notes="vocab">生词本</button>
+          <button class="seg-btn active" data-notes="page" data-i18n="正文">正文</button>
+          <button class="seg-btn" data-notes="highlights" data-i18n="划线">划线</button>
+          <button class="seg-btn" data-notes="quotes" data-i18n="金句">金句</button>
+          <button class="seg-btn" data-notes="memos" data-i18n="笔记">笔记</button>
+          <button class="seg-btn" data-notes="pins" data-i18n="书签">书签</button>
         </div>
-        <button id="exportBtn" class="btn" type="button">导出笔记</button>
+        <button id="exportBtn" class="btn" type="button" data-i18n="导出笔记">导出笔记</button>
       </div>
       <div id="notesBox"></div>
     </section>
 
+    <section class="view" data-view="vocab">
+      <div id="vocabBox"></div>
+    </section>
+
     <section class="view" data-view="shelf">
-      <div class="notes-tabs" id="shelfFilter">
-        <button class="seg-btn active" data-shelf="new">新进</button>
-        <button class="seg-btn" data-shelf="later">以后</button>
-        <button class="seg-btn" data-shelf="shortlist">精选</button>
-        <button class="seg-btn" data-shelf="done">看完</button>
+      <div class="notes-tabs" id="shelfMode">
+        <button class="seg-btn active" data-smode="videos" data-i18n="视频">视频</button>
+        <button class="seg-btn" data-smode="concepts" data-i18n="概念">概念</button>
+        <button class="seg-btn" data-smode="buddies" data-i18n="搭子">搭子</button>
       </div>
-      <p class="map-help">打开过的视频会进「新进」。先分拣，再精读。</p>
+      <div class="notes-tabs" id="shelfFilter">
+        <button class="seg-btn active" data-shelf="new" data-i18n="新进">新进</button>
+        <button class="seg-btn" data-shelf="later" data-i18n="以后">以后</button>
+        <button class="seg-btn" data-shelf="shortlist" data-i18n="精选">精选</button>
+        <button class="seg-btn" data-shelf="done" data-i18n="看完">看完</button>
+      </div>
+      <input id="shelfSearch" class="lib-search" type="search" data-i18n-placeholder="搜标题、知识块、金句、概念" placeholder="搜标题、知识块、金句、概念" />
+      <p class="map-help" id="shelfHelp" data-i18n="按视频看每支的知识块和金句；按概念看同一件事在不同视频里怎么讲。">按视频看每支的知识块和金句；按概念看同一件事在不同视频里怎么讲。</p>
       <div id="shelfBox"></div>
     </section>
 
     <section class="view" data-view="review">
       <div id="reviewBox"></div>
     </section>
+    <p class="made-by made-by-main">Made by CharlieLam<br><span data-i18n="微信">微信</span> <button type="button" class="made-wechat" data-copy-wechat>942966642</button></p>
   </main>
 
   <div id="selBar" class="selbar" hidden>
-    <button type="button" data-act="mark" data-color="def" title="定义">定义</button>
-    <button type="button" data-act="mark" data-color="ex" title="例子">例子</button>
-    <button type="button" data-act="mark" data-color="contra" title="反驳">反驳</button>
-    <button type="button" data-act="mark" data-color="act" title="行动">行动</button>
-    <button type="button" data-act="note">笔记</button>
-    <button type="button" data-act="define">查词</button>
-    <button type="button" data-act="vocab">存词</button>
-    <button type="button" data-act="ask">问这句</button>
+    <div class="selbar-row selbar-hl">
+      <button type="button" data-act="mark" data-i18n="划线">划线</button>
+      <span id="selStyles" class="sel-styles">
+        <button type="button" data-act="hl-style" data-style="line" data-i18n-title="横线" title="横线">▁</button>
+        <button type="button" data-act="hl-style" data-style="wave" data-i18n-title="波浪" title="波浪">～</button>
+        <button type="button" data-act="hl-style" data-style="dash" data-i18n-title="虚线" title="虚线">┄</button>
+        <button type="button" data-act="hl-style" data-style="box" data-i18n-title="方框" title="方框">▢</button>
+        <button type="button" data-act="hl-style" data-style="circle" data-i18n-title="圆圈" title="圆圈">○</button>
+        <button type="button" data-act="hl-style" data-style="marker" data-i18n-title="荧光笔" title="荧光笔">▮</button>
+      </span>
+      <i class="selbar-sep" aria-hidden="true"></i>
+      <span id="selMarks">
+        <button type="button" data-act="mark" data-color="def" data-i18n-title="定义" title="定义"><i class="hl-ico hl-def" aria-hidden="true"></i><span data-i18n="定义">定义</span></button>
+        <button type="button" data-act="mark" data-color="ex" data-i18n-title="例子" title="例子"><i class="hl-ico hl-ex" aria-hidden="true"></i><span data-i18n="例子">例子</span></button>
+        <button type="button" data-act="mark" data-color="contra" data-i18n-title="反驳" title="反驳"><i class="hl-ico hl-contra" aria-hidden="true"></i><span data-i18n="反驳">反驳</span></button>
+        <button type="button" data-act="mark" data-color="act" data-i18n-title="行动" title="行动"><i class="hl-ico hl-act" aria-hidden="true"></i><span data-i18n="行动">行动</span></button>
+        <button type="button" data-act="mark" data-color="key" data-i18n-title="重点" title="重点"><i class="hl-ico hl-key" aria-hidden="true"></i><span data-i18n="重点">重点</span></button>
+        <button type="button" data-act="mark" data-color="doubt" data-i18n-title="疑问" title="疑问"><i class="hl-ico hl-doubt" aria-hidden="true"></i><span data-i18n="疑问">疑问</span></button>
+      </span>
+    </div>
+    <div class="selbar-row">
+      <button type="button" data-act="loop" data-i18n="循环">循环</button>
+      <button type="button" data-act="shadow" data-i18n="跟读">跟读</button>
+      <button type="button" data-act="define" data-i18n="查词">查词</button>
+      <button type="button" data-act="unmark" id="selUnmark" hidden data-i18n="去掉划线">去掉划线</button>
+      <button type="button" data-act="vocab" data-i18n="存词">存词</button>
+      <button type="button" data-act="unvocab" id="selUnvocab" hidden data-i18n="去掉词">去掉词</button>
+      <button type="button" data-act="pin" data-i18n="夹书签">夹书签</button>
+      <button type="button" data-act="note" data-i18n="笔记">笔记</button>
+      <button type="button" data-act="ask" data-i18n="问这句">问这句</button>
+    </div>
+  </div>
+
+  <div id="markModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3 id="markModalHead" data-i18n="写一句">写一句</h3>
+      <p class="modal-quote" id="markModalQuote"></p>
+      <label class="field">
+        <span data-i18n="书签标题">书签标题</span>
+        <input id="markModalTitle" type="text" maxlength="80" data-i18n-placeholder="这一刻在讲什么…" placeholder="这一刻在讲什么…">
+      </label>
+      <label class="field">
+        <span data-i18n="此刻的感想">此刻的感想</span>
+        <textarea id="markModalNote" rows="3" maxlength="800" data-i18n-placeholder="这一刻为什么要停一下…" placeholder="这一刻为什么要停一下…"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button id="markModalCancel" class="btn" type="button" data-i18n="取消">取消</button>
+        <button id="markModalSave" class="btn btn-primary" type="button" data-i18n="保存">保存</button>
+      </div>
+    </div>
   </div>
 
   <div id="noteModal" class="modal" hidden>
     <div class="modal-card">
-      <h3>写一句笔记</h3>
+      <h3 data-i18n="写一句笔记">写一句笔记</h3>
       <p class="modal-quote" id="noteQuote"></p>
-      <textarea id="noteInput" rows="4" placeholder="这一句为什么值得记…"></textarea>
+      <textarea id="noteInput" rows="4" data-i18n-placeholder="这一句为什么值得记… 可用 [[概念]] 连到图上" placeholder="这一句为什么值得记… 可用 [[概念]] 连到图上"></textarea>
       <div class="modal-actions">
-        <button id="noteCancel" class="btn" type="button">取消</button>
-        <button id="noteSave" class="btn btn-primary" type="button">保存</button>
+        <button id="noteCancel" class="btn" type="button" data-i18n="取消">取消</button>
+        <button id="noteSave" class="btn btn-primary" type="button" data-i18n="保存">保存</button>
       </div>
     </div>
   </div>
 
   <div id="recallModal" class="modal" hidden>
     <div class="modal-card recall-card">
-      <h3>闭卷复盘</h3>
-      <p class="modal-quote">不看字幕，凭记忆写下这支视频讲了什么。写完交给 AI 对照，看漏了什么、记岔了什么。</p>
-      <textarea id="recallInput" rows="7" placeholder="它讲了…&#10;核心观点是…&#10;我记得的例子有…"></textarea>
+      <h3 data-i18n="闭卷复盘">闭卷复盘</h3>
+      <p class="modal-quote" data-i18n="不看字幕，凭记忆写下这支视频讲了什么。写完交给 AI 对照，看漏了什么、记岔了什么。">不看字幕，凭记忆写下这支视频讲了什么。写完交给 AI 对照，看漏了什么、记岔了什么。</p>
+      <textarea id="recallInput" rows="7" data-i18n-placeholder="它讲了…&#10;核心观点是…&#10;我记得的例子有…" placeholder="它讲了…&#10;核心观点是…&#10;我记得的例子有…"></textarea>
       <div id="recallResult" hidden></div>
       <div class="modal-actions">
-        <button id="recallCancel" class="btn" type="button">关闭</button>
-        <button id="recallSubmit" class="btn btn-primary" type="button">对照字幕批改</button>
+        <button id="recallCancel" class="btn" type="button" data-i18n="关闭">关闭</button>
+        <button id="recallSubmit" class="btn btn-primary" type="button" data-i18n="对照字幕批改">对照字幕批改</button>
       </div>
     </div>
   </div>
 
-  <div id="focusDock" class="focus-dock" hidden>
-    <div class="seg-toggle" id="focusLang" role="group" aria-label="字幕语言">
-      <button type="button" class="seg-btn" data-tm="original">原文</button>
-      <button type="button" class="seg-btn" data-tm="bilingual">双语</button>
-      <button type="button" class="seg-btn" data-tm="zh">中文</button>
+  <div id="cardStudio" class="card-studio" hidden>
+    <div class="card-studio-top">
+      <div>
+        <b data-i18n="做海报">做海报</b>
+        <p class="note-meta" id="cardStudioMeta"></p>
+      </div>
+      <button id="cardStudioClose" class="text-btn" type="button" data-i18n="收起">收起</button>
     </div>
-    <button id="focusExit" class="focus-exit" type="button">退出沉浸</button>
+    <div class="card-studio-kinds notes-tabs" id="cardStudioKinds"></div>
+    <div class="card-studio-tpls" id="cardStudioTpls"></div>
+    <div class="card-studio-nav">
+      <button id="cardStudioPrev" class="text-btn" type="button" data-i18n="上一张">上一张</button>
+      <span id="cardStudioPos"></span>
+      <button id="cardStudioNext" class="text-btn" type="button" data-i18n="下一张">下一张</button>
+    </div>
+    <div class="card-studio-preview" id="cardStudioPreview"></div>
+    <textarea id="cardStudioTake" class="card-studio-take" hidden data-i18n-placeholder="这句对你来说是什么意思…会写进这张海报" placeholder="这句对你来说是什么意思…会写进这张海报"></textarea>
+    <div class="card-studio-actions">
+      <button id="cardStudioPng" class="btn btn-primary" type="button" data-i18n="下载 PNG">下载 PNG</button>
+      <button id="cardStudioSvg" class="btn" type="button" data-i18n="下载 SVG">下载 SVG</button>
+    </div>
+    <p class="note-meta" id="cardStudioHint" data-i18n="换样子、写下理解，都在这张上。高度跟着文字长。">换样子、写下理解，都在这张上。高度跟着文字长。</p>
   </div>
+
+  <div id="jumpBackBar" class="jump-back" hidden></div>
+
+  <div id="focusDock" class="focus-dock" hidden>
+    <div class="seg-toggle" id="focusLang" role="group" data-i18n-aria="字幕语言" aria-label="字幕语言">
+      <button type="button" class="seg-btn" data-tm="original" data-i18n="原文">原文</button>
+      <button type="button" class="seg-btn" data-tm="bilingual" data-i18n="双语">双语</button>
+      <button type="button" class="seg-btn" data-tm="zh" data-i18n="中文">中文</button>
+    </div>
+    <button id="focusExit" class="focus-exit" type="button" data-i18n="退出沉浸">退出沉浸</button>
+  </div>
+  <script src="i18n.js"></script>
+  <script src="i18n-dict.js"></script>
+  <script src="site.js"></script>
+  <script src="word-level.js"></script>
+  <script src="card-studio.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>

@@ -3,23 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>拆砖笔记</title>
+  <title>Kaizen 笔记</title>
   <link rel="stylesheet" href="export.css" />
 </head>
 <body>
   <div class="sheet-bar no-print">
-    <div class="sheet-brand">拆砖 · 导出笔记</div>
+    <div class="sheet-brand">Kaizen · <span data-i18n="导出笔记">导出笔记</span></div>
     <div class="sheet-actions">
-      <button id="essayBtn" class="ghost" type="button">请 AI 写成一篇</button>
-      <button id="mdBtn" class="ghost" type="button">下载 Markdown</button>
-      <button id="obsBtn" class="ghost" type="button">Obsidian 版</button>
-      <button id="printBtn" class="primary" type="button">打印 / 存成 PDF</button>
+      <button id="docBtn" class="ghost" type="button" data-i18n="整份笔记">整份笔记</button>
+      <button id="cardsBtn" class="ghost" type="button" data-i18n="导出卡片">导出卡片</button>
+      <button id="essayBtn" class="ghost" type="button" data-i18n="请 AI 写成一篇">请 AI 写成一篇</button>
+      <button id="mdBtn" class="ghost" type="button" data-i18n="下载 Markdown">下载 Markdown</button>
+      <button id="obsBtn" class="ghost" type="button" data-i18n="这篇 Obsidian">这篇 Obsidian</button>
+      <button id="obsAllBtn" class="ghost" type="button" data-i18n="全部打包">全部打包</button>
+      <button id="printBtn" class="primary" type="button" data-i18n="打印 / 存成 PDF">打印 / 存成 PDF</button>
     </div>
   </div>
   <p class="sheet-hint no-print" id="sheetHint">
     预览确认后点「打印 / 存成 PDF」。打印机选「另存为 PDF」，并勾选「背景图形」。
   </p>
+  <div id="cardDock" class="card-dock no-print" hidden>
+    <div class="card-dock-row">
+      <span data-i18n="内容">内容</span>
+      <button type="button" data-kind="quotes" data-i18n="金句">金句</button>
+      <button type="button" data-kind="vocab" data-i18n="生词">生词</button>
+      <button type="button" data-kind="notes" data-i18n="笔记">笔记</button>
+    </div>
+    <div class="card-dock-row" id="cardTplRow">
+      <span data-i18n="模板">模板</span>
+    </div>
+    <div class="card-dock-row">
+      <span data-i18n="哪一张">哪一张</span>
+      <button type="button" id="cardPrev" data-i18n="上一张">上一张</button>
+      <select id="cardPick"></select>
+      <button type="button" id="cardNext" data-i18n="下一张">下一张</button>
+      <button type="button" id="cardAll" data-i18n="全部">全部</button>
+    </div>
+    <div class="card-dock-row">
+      <span data-i18n="下载">下载</span>
+      <button type="button" id="cardSvgBtn" data-i18n="这张 SVG">这张 SVG</button>
+      <button type="button" id="cardPngBtn" data-i18n="这张 PNG">这张 PNG</button>
+      <button type="button" id="cardAllSvgBtn" data-i18n="全部 SVG">全部 SVG</button>
+      <button type="button" id="cardAllPngBtn" data-i18n="全部 PNG">全部 PNG</button>
+    </div>
+  </div>
   <article id="doc" class="doc"></article>
+  <script src="i18n.js"></script>
+  <script src="i18n-dict.js"></script>
+  <script src="site.js"></script>
+  <script src="card-studio.js"></script>
   <script src="export.js"></script>
 </body>
 </html>

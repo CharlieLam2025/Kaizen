@@ -1,6 +1,7 @@
-"""Generate Chrome toolbar icons for 拆砖.
+"""Generate Chrome toolbar icons for Kaizen.
 
-Four families, three sizes. Family A is copied to icons/icon{16,48,128}.png.
+Families: folio (default mark), paper bricks (legacy), seal 开, subtitle lines.
+Default icons/icon{16,48,128}.png use the existing mark.
 Run from repo root: python scripts/make-icons.py
 """
 
@@ -70,8 +71,25 @@ def brick_stack(d: ImageDraw.ImageDraw, size: int, fill: tuple[int, int, int, in
             d.rectangle(box, fill=color)
 
 
+def family_folio(size: int) -> Image.Image:
+    """Open spread: vermillion field, cream page, a thin gutter."""
+    img = rounded_tile(size, BRICK)
+    d = ImageDraw.Draw(img)
+    pad = max(2, int(size * 0.18))
+    page = (pad, pad, size - pad - 1, size - pad - 1)
+    radius = 0 if size <= 16 else max(1, size // 16)
+    if radius:
+        d.rounded_rectangle(page, radius=radius, fill=CREAM)
+    else:
+        d.rectangle(page, fill=CREAM)
+    mid = size // 2
+    width = max(1, size // 28)
+    d.line((mid, pad + 1, mid, size - pad - 2), fill=BRICK, width=width)
+    return img
+
+
 def family_a_pulled(size: int) -> Image.Image:
-    """Terracotta field, cream bricks, middle one pulled. Best at 16px."""
+    """Legacy brick stack."""
     img = rounded_tile(size, BRICK)
     brick_stack(ImageDraw.Draw(img), size, CREAM, PAPER)
     return img
@@ -85,7 +103,7 @@ def family_b_paper(size: int) -> Image.Image:
 
 
 def family_c_seal(size: int) -> Image.Image:
-    """Vermillion seal with 拆. 16px falls back to a carved cut."""
+    """Vermillion seal with 开. 16px falls back to a carved cut."""
     img = rounded_tile(size, BRICK, radius=0.12)
     d = ImageDraw.Draw(img)
     if size <= 16:
@@ -95,7 +113,7 @@ def family_c_seal(size: int) -> Image.Image:
         return img
     font_path = KAI if KAI.exists() else HEI
     font = ImageFont.truetype(str(font_path), int(size * 0.62))
-    text = "拆"
+    text = "开"
     bbox = d.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = (size - tw) / 2 - bbox[0]
@@ -134,6 +152,7 @@ def family_d_lines(size: int) -> Image.Image:
 
 
 FAMILIES = {
+    "folio": family_folio,
     "a-pulled": family_a_pulled,
     "b-paper": family_b_paper,
     "c-seal": family_c_seal,
@@ -146,7 +165,7 @@ def main() -> None:
         for size in SIZES:
             save(fn(size), VAR / key / f"icon{size}.png")
     for size in SIZES:
-        save(family_a_pulled(size), OUT / f"icon{size}.png")
+        save(family_folio(size), OUT / f"icon{size}.png")
     print(f"wrote {OUT}")
 
 

@@ -2,8 +2,8 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $dist = Join-Path $root "dist"
-$stage = Join-Path $dist "chaizhuan"
-$zip = Join-Path $dist "chaizhuan.zip"
+$stage = Join-Path $dist "kaizen"
+$zip = Join-Path $dist "kaizen.zip"
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 if (Test-Path $zip) { Remove-Item $zip -Force }
@@ -16,6 +16,11 @@ $keep = @(
   "panel.html",
   "panel.css",
   "panel.js",
+  "word-level.js",
+  "card-studio.js",
+  "site.js",
+  "i18n.js",
+  "i18n-dict.js",
   "export.html",
   "export.css",
   "export.js",

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "拆砖",
-  "short_name": "拆砖",
-  "version": "0.5.1",
-  "description": "把 YouTube 视频拆成能记住的砖：双语阅读、四色划线、知识块、概念图、复习卡、笔记导出。",
+  "name": "Kaizen",
+  "short_name": "Kaizen",
+  "version": "0.7.5",
+  "description": "Kaizen — 把 YouTube 和 B 站当书读：双语字幕、划线笔记、生词本，再按知识块拆开。",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -12,16 +12,30 @@
   "permissions": ["sidePanel", "storage", "tabs", "scripting"],
   "host_permissions": [
     "*://*.youtube.com/*",
+    "*://youtube.com/*",
+    "*://youtu.be/*",
+    "*://*.youtu.be/*",
+    "*://*.youtube-nocookie.com/*",
+    "*://*.bilibili.com/*",
+    "*://*.hdslb.com/*",
     "https://api.deepseek.com/*",
-    "https://api.supadata.ai/*"
+    "https://api.supadata.ai/*",
+    "https://*.workers.dev/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["*://*.youtube.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://youtube.com/*",
+        "*://youtu.be/*",
+        "*://*.youtu.be/*",
+        "*://*.youtube-nocookie.com/*",
+        "*://*.bilibili.com/*"
+      ],
+      "js": ["i18n.js", "i18n-dict.js", "site.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
@@ -29,11 +43,33 @@
     "default_path": "panel.html"
   },
   "action": {
-    "default_title": "打开拆砖",
+    "default_title": "Kaizen",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/mark-cat-golden.png", "icons/mark-dog-samoyed.png"],
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://youtube.com/*",
+        "*://youtu.be/*",
+        "*://*.youtu.be/*",
+        "*://*.youtube-nocookie.com/*",
+        "*://*.bilibili.com/*"
+      ]
+    }
+  ],
+  "commands": {
+    "reload-kaizen": {
+      "suggested_key": {
+        "default": "Alt+R",
+        "mac": "Alt+R"
+      },
+      "description": "重新加载 Kaizen，并刷新已打开的视频页"
     }
   }
 }

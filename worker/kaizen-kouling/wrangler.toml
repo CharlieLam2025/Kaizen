@@ -1,0 +1,9 @@
+name = "kaizen-kouling"
+main = "worker.js"
+compatibility_date = "2024-11-12"
+
+# 部署前先建 KV：npx wrangler kv namespace create GROUPS
+# 把返回的 id 填到下面。
+[[kv_namespaces]]
+binding = "GROUPS"
+id = "REPLACE_ME"
