@@ -198,6 +198,7 @@ const DEFAULT_SETTINGS = {
   diveModel: "deepseek-v4-pro",
   supadataKey: "",
   koulingUrl: "",
+  transcriptMode: "bilingual",
 };
 
 async function handleKouling(message) {
@@ -739,7 +740,7 @@ async function handleAsk({ question, contextText, title, gist, at, focus, outlin
 
 function translateSystem(settings) {
   const name = langMeta(normalizeLang(settings.uiLang) || "zh-CN").ai;
-  return `把视频字幕逐行翻译成${name}。口语、自然、忠实原意；专有名词和常用技术词保留原文。
+  return `把视频字幕逐行翻译成${name}。口语、自然、忠实原意；专有名词和常用技术词可夹在译文里，但整句必须是${name}，禁止整句照抄原文。
 输入是一个字符串数组。输出数组长度必须相同，不要合并或拆分。
 每条译文不要带序号，不要写成「1. …」「27. …」。
 
@@ -769,7 +770,6 @@ async function handleTranslate({ lines }) {
     if (!/[\u4e00-\u9fff]/.test(zh) && /(error|exception|failed|request|api key)/i.test(zh)) return "";
     return zh;
   });
-  if (!out.some(Boolean)) throw new Error("翻译结果为空");
   return { translations: out };
 }
 
@@ -1422,7 +1422,13 @@ async function biliTranscriptFromTab(videoId) {
         res = await chrome.tabs.sendMessage(tab.id, { type: "VB_TRANSCRIPT", videoId });
       }
       if (res?.ok && res.segments?.length) {
-        return { segments: res.segments, language: res.language || "", trackKind: "bili", title: res.title || "" };
+        return {
+          segments: res.segments,
+          translations: res.translations || {},
+          language: res.language || "",
+          trackKind: "bili",
+          title: res.title || "",
+        };
       }
     } catch (_e) {
       /* next tab */
@@ -1465,7 +1471,7 @@ async function youtubeTranscriptFromTab(videoId) {
   const askTab = (tabId, payload) =>
     Promise.race([
       chrome.tabs.sendMessage(tabId, payload),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 6000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 10000)),
     ]).catch(() => null);
 
   for (const tabId of tabIds) {
@@ -1478,6 +1484,7 @@ async function youtubeTranscriptFromTab(videoId) {
       if (res?.ok && res.segments?.length) {
         return {
           segments: res.segments,
+          translations: res.translations || {},
           language: res.language || "",
           trackKind: res.trackKind || "page",
           title: res.title || "",
@@ -1545,7 +1552,7 @@ async function handleSupadataTranscriptWork({ videoId }) {
   if (isBiliId(videoId)) return handleBiliTranscript({ videoId });
   const fromPage = await Promise.race([
     youtubeTranscriptFromTab(videoId),
-    new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 12000)),
   ]);
   if (fromPage) return fromPage;
   const settings = await getSettings();
@@ -1719,14 +1726,54 @@ async function handleDirectTranscript({ videoId }) {
   }
 
   if (!segments.length) throw new Error("InnerTube 字幕解析失败");
+  let translations = {};
+  const srcLang = String(track.languageCode || "");
+  if (track.isTranslatable !== false && !isZhCaptionLang(srcLang)) {
+    translations = await fetchTlangTranslations(track.baseUrl, segments);
+  }
   const details = player.videoDetails || {};
   return {
     segments,
+    translations,
     language: track.languageCode || "",
     trackKind: track.kind || "manual",
     title: details.title || "",
     channel: details.author || "",
   };
+}
+
+async function fetchTlangTranslations(baseUrl, segments) {
+  if (!baseUrl || !segments?.length) return {};
+  const tlang = typeof captionTlang === "function" ? captionTlang() : "zh-Hans";
+  const url = new URL(baseUrl, "https://www.youtube.com");
+  url.searchParams.delete("fmt");
+  url.searchParams.set("fmt", "json3");
+  url.searchParams.set("tlang", tlang);
+  try {
+    const cap = await fetch(url.toString());
+    if (!cap.ok) return {};
+    const events = JSON.parse(await cap.text()).events || [];
+    const raw = [];
+    for (const ev of events) {
+      if (!Array.isArray(ev.segs)) continue;
+      const text = ev.segs
+        .map((s) => s.utf8 || "")
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!text) continue;
+      const start = (ev.tStartMs || 0) / 1000;
+      raw.push({
+        text,
+        offset: start * 1000,
+        duration: ev.dDurationMs || 0,
+      });
+    }
+    const zhSegs = mergeSupadataChunks(raw);
+    return alignCaptionTranslations(segments, zhSegs);
+  } catch (_e) {
+    return {};
+  }
 }
 
 const EXPORT_SYSTEM = `你是知识笔记编辑。把用户的学习材料整理成一篇可以长期保存的中文笔记。只输出 JSON：

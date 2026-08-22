@@ -142,6 +142,7 @@
         <button type="button" class="seg-btn" data-m="deepseek-v4-pro">Pro</button>
       </div>
       <button id="vocabLevelBtn" class="ghost-chip vocab-chip need-set" type="button" data-i18n-title="按英语水平筛这篇的生词" title="按英语水平筛这篇的生词">设词汇水平</button>
+      <button id="achieveTopBtn" class="text-btn" type="button" data-i18n-title="看过的、记下的、拆过的，都会变成成就" title="看过的、记下的、拆过的，都会变成成就"><span data-i18n="成就">成就</span><span id="achieveTopBadge" class="tab-badge" hidden></span></button>
       <button id="reviewTopBtn" class="text-btn" type="button" data-i18n-title="做成的复习卡在这里" title="做成的复习卡在这里"><span data-i18n="复习">复习</span><span id="reviewTopBadge" class="tab-badge" hidden></span></button>
       <button id="exportTopBtn" class="text-btn" type="button" data-i18n="导出">导出</button>
       <button id="settingsTopBtn" class="text-btn" type="button" data-i18n="设置">设置</button>
@@ -150,6 +151,7 @@
     </div>
   </header>
   <section id="themePop" class="theme-pop drawer" hidden></section>
+  <section id="achievePop" class="achieve-pop drawer" hidden></section>
   <div id="vocabTestModal" class="modal" hidden></div>
   <div id="moreMenu" class="more-menu" hidden>
     <button id="tutReplay" type="button" data-i18n="教程">教程</button>
@@ -167,6 +169,7 @@
     </label>
     <button id="popVocabTest" class="btn" type="button" data-i18n="测一下词汇量">测一下词汇量</button>
     <p class="setup-lead" id="popVocabHint" style="margin:8px 0 0">点一下就保存。也可以测 20 个词，估一个更准的量。不是官方考纲。</p>
+    <div id="popWordPacks" class="wordpack-box"></div>
   </section>
 
   <section id="settingsDrawer" class="settings-page" hidden></section>
@@ -253,8 +256,8 @@
     <section class="view active" data-view="read">
       <div class="reader-tools">
         <div class="seg-toggle read-lang" role="group" data-i18n-aria="字幕语言" aria-label="字幕语言">
-          <button id="modeOriginal" class="seg-btn active" data-i18n="原文">原文</button>
-          <button id="modeBilingual" class="seg-btn" data-i18n="双语">双语</button>
+          <button id="modeOriginal" class="seg-btn" data-i18n="原文">原文</button>
+          <button id="modeBilingual" class="seg-btn active" data-i18n="双语">双语</button>
           <button id="modeZh" class="seg-btn" data-i18n="中文">中文</button>
         </div>
         <button id="copyTranscriptBtn" class="ghost-chip" type="button" data-i18n="复制全文">复制全文</button>
@@ -492,6 +495,7 @@
   <script src="i18n-dict.js"></script>
   <script src="site.js"></script>
   <script src="word-level.js"></script>
+  <script src="achieve.js"></script>
   <script src="card-studio.js"></script>
   <script src="panel.js"></script>
 </body>

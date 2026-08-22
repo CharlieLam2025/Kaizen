@@ -99,7 +99,7 @@ const state = {
   dives: {},
   scripts: {},
   translations: {},
-    transcriptMode: "original",
+    transcriptMode: "bilingual",
   chat: [],
   askContext: null,
   study: null,
@@ -341,12 +341,16 @@ function cleanZh(text) {
     .trim();
 }
 
-function isRealTranslation(zh, en) {
+function translationKind(zh, en) {
   const cleaned = cleanZh(zh);
-  if (!cleaned) return false;
-  if (looksLikeFailedZh(cleaned)) return false;
-  if (typeof sameAsSource === "function" && sameAsSource(cleaned, en)) return false;
-  return true;
+  if (!cleaned) return "empty";
+  if (looksLikeFailedZh(cleaned)) return "error";
+  if (typeof sameAsSource === "function" && sameAsSource(cleaned, en)) return "echo";
+  return "ok";
+}
+
+function isRealTranslation(zh, en) {
+  return translationKind(zh, en) === "ok";
 }
 
 function translationAt(i) {
@@ -1162,6 +1166,33 @@ function captionsOnlyMode() {
   return settingsCache.captionsOnly !== false;
 }
 
+const LIVE_CC_FONTS = ["sans", "serif", "round", "mono"];
+
+function liveCcSizeOf(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 16;
+  return Math.min(28, Math.max(13, Math.round(n)));
+}
+
+function liveCcFontOf(raw) {
+  return LIVE_CC_FONTS.includes(raw) ? raw : "sans";
+}
+
+function paintLiveStyleSettings() {
+  const size = liveCcSizeOf(settingsCache.liveCcSize);
+  const font = liveCcFontOf(settingsCache.liveCcFont);
+  if ($("setLiveSizeLabel")) $("setLiveSizeLabel").textContent = String(size);
+  $("setLiveFont")?.querySelectorAll("[data-font]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.font === font);
+  });
+}
+
+function preferredTranscriptMode() {
+  const mode = settingsCache.transcriptMode || state.transcriptMode || "bilingual";
+  if (mode === "original" || mode === "zh" || mode === "bilingual") return mode;
+  return "bilingual";
+}
+
 async function paintStateTabs() {
   const box = $("stateOpen");
   const list = $("stateTabList");
@@ -1334,15 +1365,26 @@ async function loadSettings() {
   applyTheme(settingsCache.uiTheme || "paper");
   applyTypeSize();
   applyPlayRate(playbackRate, false);
+  let persist = false;
   if (!settingsCache.clientId) {
     settingsCache.clientId = uid("kz");
-    await chrome.storage.local.set({ vb_settings: settingsCache });
+    persist = true;
   }
+  if (!["original", "bilingual", "zh"].includes(settingsCache.transcriptMode)) {
+    settingsCache.transcriptMode = "bilingual";
+    persist = true;
+  }
+  if (persist) await chrome.storage.local.set({ vb_settings: settingsCache });
+  state.transcriptMode = preferredTranscriptMode();
   return settingsCache;
 }
 
 async function saveSettings(next) {
-  settingsCache = { ...settingsCache, ...next };
+  let stored = {};
+  try {
+    stored = (await chrome.storage.local.get("vb_settings")).vb_settings || {};
+  } catch (_e) {}
+  settingsCache = { ...stored, ...settingsCache, ...next };
   await chrome.storage.local.set({ vb_settings: settingsCache });
   if (next.uiTheme) applyTheme(next.uiTheme);
   paintModelSwitch();
@@ -1425,6 +1467,128 @@ function resolveVocabLevel() {
   return { ...raw, label: t(raw.label) };
 }
 
+let wordFreqList = [];
+let wordPacksHave = {};
+
+function wordPackIds() {
+  return globalThis.WordLevel?.PACK_IDS || ["cet4", "cet6", "kaoyan", "ielts", "toefl", "sat", "gre"];
+}
+
+function wordPackReady(id) {
+  if (id === "off") return false;
+  return wordFreqList.length > 1000;
+}
+
+async function loadWordPacks() {
+  try {
+    const stored = await chrome.storage.local.get(["vb_wordfreq", "vb_wordpacks"]);
+    if (Array.isArray(stored.vb_wordfreq) && stored.vb_wordfreq.length > 1000) {
+      wordFreqList = stored.vb_wordfreq.map((w) => String(w || "").toLowerCase()).filter(Boolean);
+    }
+    wordPacksHave = stored.vb_wordpacks && typeof stored.vb_wordpacks === "object" ? stored.vb_wordpacks : {};
+  } catch (_e) {
+    wordPacksHave = {};
+  }
+}
+
+async function ensureWordFreq() {
+  if (wordFreqList.length > 1000) return wordFreqList;
+  await loadWordPacks();
+  if (wordFreqList.length > 1000) return wordFreqList;
+  const res = await fetch(chrome.runtime.getURL("packs/english-freq.txt"));
+  if (!res.ok) throw new Error(t("词汇包还没准备好。"));
+  const text = await res.text();
+  const seen = new Set();
+  const words = [];
+  for (const raw of String(text || "").split(/\s+/)) {
+    const w = raw.toLowerCase();
+    if (!/^[a-z][a-z'-]{1,39}$/.test(w) || seen.has(w)) continue;
+    seen.add(w);
+    words.push(w);
+  }
+  if (words.length < 1000) throw new Error(t("词汇包还没准备好。"));
+  wordFreqList = words;
+  await chrome.storage.local.set({ vb_wordfreq: words });
+  return words;
+}
+
+async function installWordPack(id, { all = false } = {}) {
+  const freq = await ensureWordFreq();
+  const next = { ...wordPacksHave };
+  const at = Date.now();
+  for (const packId of wordPackIds()) {
+    const known = Number(globalThis.WordLevel?.BANDS?.[packId]?.known) || freq.length;
+    next[packId] = { n: Math.min(known, freq.length), at };
+  }
+  wordPacksHave = next;
+  await chrome.storage.local.set({ vb_wordfreq: freq, vb_wordpacks: next });
+  return next;
+}
+
+function packKnownSet(level) {
+  const n = Number(level?.known) || 0;
+  return globalThis.WordLevel?.knownFromFreq(wordFreqList, n) || new Set();
+}
+
+function wordPackBoxHtml() {
+  const ids = wordPackIds();
+  const ready = wordFreqList.length > 1000;
+  return `
+    <p class="wordpack-kicker">${t("词汇包")}</p>
+    <p class="setup-lead">${t("下载到本机后，按这个水平筛生词不再调用 AI。按常用度切一刀，不是官方考纲。")}</p>
+    <div class="wordpack-list">
+      ${ids
+        .map((packId) => {
+          const meta = globalThis.WordLevel?.BANDS?.[packId] || { label: packId, known: 0 };
+          const have = Boolean(wordPacksHave[packId] || ready);
+          const n = wordPacksHave[packId]?.n || meta.known;
+          return `<div class="wordpack-row">
+            <div>
+              <b>${t(meta.label)}</b>
+              <span>${have ? t("已下载 · {n} 词", { n }) : t("约 {n} 词", { n: meta.known })}</span>
+            </div>
+            <button type="button" class="btn${have ? "" : " btn-primary"}" data-pack="${packId}" ${have ? "disabled" : ""}>${have ? t("已在本机") : t("下载")}</button>
+          </div>`;
+        })
+        .join("")}
+    </div>
+    <div class="row-actions">
+      <button type="button" class="text-btn" data-pack-all>${ready ? t("词表已在本机") : t("一次装齐")}</button>
+    </div>
+  `;
+}
+
+function bindWordPackBox(root) {
+  if (!root) return;
+  root.innerHTML = wordPackBoxHtml();
+  const run = async (id, all) => {
+    try {
+      await installWordPack(id, { all });
+      paintWordPackBoxes();
+      flashHint(all ? t("词表已装到本机。筛生词不再花 token。") : t("已下载「{name}」词包", { name: t(globalThis.WordLevel?.BANDS?.[id]?.label || id) }));
+      checkAchievementsSoon("pack");
+      const level = resolveVocabLevel();
+      if (level.id !== "off" && state.segments.length) scanVideoVocab({ force: true });
+    } catch (error) {
+      flashHint(friendlyAiError(error.message, t("词汇包还没准备好。")));
+    }
+  };
+  root.querySelectorAll("[data-pack]").forEach((btn) => {
+    btn.addEventListener("click", () => run(btn.dataset.pack, false));
+  });
+  root.querySelector("[data-pack-all]")?.addEventListener("click", () => {
+    if (wordFreqList.length > 1000) return;
+    run("ielts", true);
+  });
+}
+
+function paintWordPackBoxes() {
+  ["popWordPacks", "setWordPacks"].forEach((id) => {
+    const el = $(id);
+    if (el) bindWordPackBox(el);
+  });
+}
+
 function paintVocabBand(prefix, band) {
   const box = $(`${prefix}VocabBand`);
   const wrap = $(`${prefix}VocabScoreWrap`);
@@ -1497,6 +1661,7 @@ function keysTableHtml() {
       <tr><td>A</td><td>Again · ${t("再听这句或划过的几句。再按一次，或按 Esc 停")}</td></tr>
       <tr><td>N</td><td>Note · ${t("在这一刻写下自己的话")}</td></tr>
       <tr><td>B</td><td>Bookmark · ${t("夹在这一秒，事后可写一句")}</td></tr>
+      <tr><td>C</td><td>${t("片上字幕条。打开后画面下方多一条可点的字幕")}</td></tr>
     </table>
     <p class="setup-lead">${t("书签会钉在视频自己的进度条上。事后可补一句。N 只在侧栏里按，避免抢掉 YouTube 的下一集。")}</p>`
 }
@@ -1511,10 +1676,12 @@ function setVocabPop(open) {
   pop.hidden = !open;
   if (open) {
     if ($("moreMenu")) $("moreMenu").hidden = true;
+    setAchievePop(false);
     closeSettings();
     bindVocabBandUI("pop", () => applyVocabPick("pop"));
     bindVocabTestBtn("popVocabTest");
     paintVocabChrome();
+    paintWordPackBoxes();
   }
 }
 
@@ -1626,7 +1793,9 @@ function paintVocabChrome() {
     hint.textContent =
       level.id === "off"
         ? t("点一下就保存。也可以测 20 个词，估一个更准的量。不是官方考纲。")
-        : `现在按「${level.label}」筛。打开视频会先给生词库。`;
+        : wordPackReady(level.id)
+          ? t("现在按「{name}」筛。这篇走本地词包，不花 token。", { name: level.label })
+          : t("现在按「{name}」筛。下载词包后就不走 AI。", { name: level.label });
   }
   ["setup", "set", "pop", "state", "preview"].forEach((prefix) => {
     if (!$(`${prefix}VocabBand`)) return;
@@ -1776,6 +1945,7 @@ async function loadLists() {
     "vb_lib",
     "vb_buddies",
     "vb_group",
+    "vb_achieve",
   ]);
   highlights = stored.vb_highlights || [];
   notes = stored.vb_notes || [];
@@ -1788,10 +1958,209 @@ async function loadLists() {
   lib = stored.vb_lib || {};
   buddies = stored.vb_buddies || [];
   groupSnap = stored.vb_group || null;
+  achieveStore = { ...emptyAchieve(), ...(stored.vb_achieve || {}) };
+  achieveStore.unlocked = achieveStore.unlocked || {};
+  achieveStore.seen = achieveStore.seen || {};
+  achieveStore.flags = achieveStore.flags || {};
+  achieveStore.doneKeys = achieveStore.doneKeys || {};
+  achieveStore.days = Array.isArray(achieveStore.days) ? achieveStore.days : [];
 }
 
 async function saveList(key, value) {
   await chrome.storage.local.set({ [key]: value });
+}
+
+let achieveStore = emptyAchieve();
+let achieveTimer = 0;
+
+function emptyAchieve() {
+  return globalThis.Achieve?.emptyStore?.() || { unlocked: {}, seen: {}, flags: {}, days: [], doneKeys: {}, doneChapters: 0 };
+}
+
+function videoSiteKind(id) {
+  const s = String(id || "");
+  if (/^BV/i.test(s) || /^av\d+/i.test(s) || /:p\d+$/i.test(s)) return "bili";
+  if (s) return "yt";
+  return "";
+}
+
+function rememberCurrentDone() {
+  const vid = state.videoId;
+  if (!vid || !state.blocks?.length) return false;
+  achieveStore.doneKeys = achieveStore.doneKeys || {};
+  let added = false;
+  state.blocks.forEach((_, i) => {
+    if (blockProgress(i) !== "done") return;
+    const key = `${vid}:${i}`;
+    if (achieveStore.doneKeys[key]) return;
+    achieveStore.doneKeys[key] = 1;
+    added = true;
+  });
+  if (added) achieveStore.doneChapters = Object.keys(achieveStore.doneKeys).length;
+  return added;
+}
+
+function collectAchieveStats() {
+  const flags = achieveStore.flags || {};
+  const touched = globalThis.Achieve?.touchDays?.(achieveStore.days) || { days: achieveStore.days || [], streak: 0 };
+  let chapters = 0;
+  for (const [id, rec] of Object.entries(lib || {})) {
+    if (id === state.videoId) continue;
+    chapters += rec?.bricks?.length || 0;
+  }
+  chapters += state.blocks?.length || 0;
+  const doneNow = (state.blocks || []).filter((_, i) => blockProgress(i) === "done").length;
+  const youtube = (shelf || []).filter((x) => videoSiteKind(x.videoId) === "yt").length;
+  const bili = (shelf || []).filter((x) => videoSiteKind(x.videoId) === "bili").length;
+  return {
+    videos: (shelf || []).length,
+    words: (vocab || []).length,
+    highlights: (highlights || []).length,
+    notes: (notes || []).length,
+    marks: (marks || []).length,
+    quotes: (quotes || []).length,
+    chapters,
+    doneChapters: Math.max(
+      Number(achieveStore.doneChapters) || 0,
+      Object.keys(achieveStore.doneKeys || {}).length,
+      doneNow,
+    ),
+    reviews: (cards || []).filter((c) => Number(c.reps) > 0).length,
+    packs: wordFreqList.length > 1000 || Object.keys(wordPacksHave || {}).length ? 1 : 0,
+    youtube,
+    bili,
+    asks: Number(flags.ask || 0) + ((state.chat || []).some((m) => m?.role === "user") ? 1 : 0),
+    maps: Boolean(flags.map || state.conceptMap || (atlas?.concepts || []).length),
+    live: Boolean(flags.live || settingsCache.liveCc),
+    loop: Boolean(flags.loop),
+    shadow: Boolean(flags.shadow),
+    exported: Boolean(flags.export),
+    streak: touched.streak,
+    days: (touched.days || []).length,
+  };
+}
+
+function paintAchieveBadge() {
+  const n = globalThis.Achieve?.unseen?.(achieveStore) || 0;
+  const badge = $("achieveTopBadge");
+  const btn = $("achieveTopBtn");
+  if (badge) {
+    badge.hidden = n === 0;
+    badge.textContent = n > 99 ? "99+" : String(n);
+  }
+  btn?.classList.toggle("pulse", n > 0);
+}
+
+function setAchievePop(open) {
+  const pop = $("achievePop");
+  if (!pop) return;
+  if (open) {
+    $("moreMenu") && ($("moreMenu").hidden = true);
+    setVocabPop(false);
+    if ($("themePop")) $("themePop").hidden = true;
+    closeSettings();
+    renderAchievePop();
+    pop.hidden = false;
+  } else if (!pop.hidden) {
+    pop.hidden = true;
+    markAchieveSeen().catch(() => {});
+  }
+}
+
+function renderAchievePop() {
+  const pop = $("achievePop");
+  const api = globalThis.Achieve;
+  if (!pop || !api) return;
+  const stats = collectAchieveStats();
+  const unlocked = achieveStore.unlocked || {};
+  const total = api.DEFS.length;
+  const got = api.DEFS.filter((d) => unlocked[d.id]).length;
+  const groups = api.GROUPS.map((g) => {
+    const rows = api.DEFS.filter((d) => d.group === g.id)
+      .map((d) => {
+        const on = Boolean(unlocked[d.id]);
+        const fresh = on && !achieveStore.seen?.[d.id];
+        const have = typeof d.have === "function" ? Number(d.have(stats) || 0) : 0;
+        const need = Number(d.need) || 0;
+        const bar =
+          need && !on
+            ? `<span class="achieve-bar">${Math.min(have, need)} / ${need}</span>`
+            : "";
+        return `<article class="achieve-card${on ? " on" : ""}">
+          <div>
+            <b>${t(d.title)}${fresh ? `<span class="achieve-new">${t("新")}</span>` : ""}</b>
+            <p>${t(d.blurb)}</p>
+          </div>
+          ${bar || (on ? `<span class="achieve-on">${t("已得到")}</span>` : `<span class="achieve-wait">${t("还在路上")}</span>`)}
+        </article>`;
+      })
+      .join("");
+    return `<section class="achieve-group"><h3>${t(g.label)}</h3>${rows}</section>`;
+  }).join("");
+  pop.innerHTML = `
+    <div class="achieve-head">
+      <div>
+        <p class="achieve-kicker">${t("成就")}</p>
+        <p class="setup-lead">${t("看过的、记下的、拆过的，都会记在这里。不是分数，是你改过的痕迹。")}</p>
+      </div>
+      <strong>${got} / ${total}</strong>
+    </div>
+    ${groups}
+  `;
+}
+
+async function persistAchieve() {
+  await chrome.storage.local.set({ vb_achieve: achieveStore });
+}
+
+async function checkAchievements({ silent = false } = {}) {
+  const api = globalThis.Achieve;
+  if (!api) return [];
+  const prevDays = achieveStore.days || [];
+  const touched = api.touchDays(prevDays);
+  const daysChanged =
+    touched.days.length !== prevDays.length || touched.days.join("\0") !== prevDays.join("\0");
+  achieveStore.days = touched.days;
+  const doneChanged = rememberCurrentDone();
+  const stats = collectAchieveStats();
+  const result = api.evaluate(stats, achieveStore);
+  const fresh = result.fresh || [];
+  achieveStore.unlocked = result.unlocked;
+  if (fresh.length || daysChanged || doneChanged) await persistAchieve();
+  paintAchieveBadge();
+  if ($("achievePop") && !$("achievePop").hidden) renderAchievePop();
+  if (!silent && fresh.length) {
+    const first = api.byId(fresh[0]);
+    const text =
+      fresh.length === 1
+        ? t("成就：{name}", { name: t(first?.title || "改善") })
+        : t("一下子解锁了 {n} 个成就", { n: fresh.length });
+    flashHint(text, {
+      extra: {
+        label: t("看看"),
+        run: () => setAchievePop(true),
+      },
+    });
+  }
+  return fresh;
+}
+
+function checkAchievementsSoon(flag) {
+  if (flag) achieveStore.flags[flag] = true;
+  clearTimeout(achieveTimer);
+  achieveTimer = setTimeout(() => {
+    checkAchievements().catch(() => {});
+  }, 240);
+}
+
+async function markAchieveSeen() {
+  const unlocked = achieveStore.unlocked || {};
+  achieveStore.seen = { ...unlocked };
+  Object.keys(unlocked).forEach((id) => {
+    achieveStore.seen[id] = true;
+  });
+  await persistAchieve();
+  paintAchieveBadge();
 }
 
 function normLabel(text) {
@@ -2300,6 +2669,7 @@ async function upsertShelf(partial) {
   await saveList("vb_shelf", shelf);
   scheduleKoulingPush();
   renderShelf();
+  checkAchievementsSoon();
 }
 
 function bindLibJumps(root) {
@@ -3299,6 +3669,7 @@ function closeSettings() {
 function openSettings(opts = {}) {
   $("moreMenu") && ($("moreMenu").hidden = true);
   setVocabPop(false);
+  setAchievePop(false);
   if ($("themePop")) $("themePop").hidden = true;
   const page = $("settingsDrawer");
   if (!page) return;
@@ -3375,6 +3746,7 @@ function refreshI18nChrome() {
   paintVocabBand("state", settingsCache.vocabBand || "off");
   if (!$("tutorial")?.hidden) renderTutorial();
   if (!$("settingsDrawer")?.hidden) fillSettingsDrawer();
+  if ($("achievePop") && !$("achievePop").hidden) renderAchievePop();
   updateLoopBtn();
   paintRateControls();
   if (!$("mainBox")?.hidden) {
@@ -3489,8 +3861,26 @@ function fillSettingsDrawer() {
       <input type="text" id="setVocabScore" inputmode="decimal" placeholder="${t("例如 6.5")}" />
     </label>
     <button id="setVocabTest" class="text-btn" type="button">${t("测一下词汇量")}</button>
+    <div id="setWordPacks" class="wordpack-box"></div>
     <label class="field check"><span><input type="checkbox" id="setCaptionsOnly" ${captionsOnlyMode() ? "checked" : ""} /> ${t("只要字幕")}</span></label>
-    <p class="setup-lead">${t("打开后不自动翻译、拆页或做学习包。点「双语」或「拆」再花额度。")}</p>
+    <p class="setup-lead">${t("打开后不自动拆页或做学习包。双语仍会开着，点「原文」才不译。")}</p>
+    <label class="field check switch"><span><input type="checkbox" id="setLiveCc" ${settingsCache.liveCc ? "checked" : ""} /> ${t("片上字幕条")}</span></label>
+    <p class="setup-lead">${t("打开后，系统字幕会淡出，改由画面按播放头跟上这一句。点词可查可存，点「跳这句」会跟侧栏对齐。")}</p>
+    <div class="field" id="setLiveStyle">
+      <span>${t("片上字幕样式")}</span>
+      <div class="live-style-row">
+        <button type="button" class="icon-btn" id="setLiveSmaller" title="${t("字号减小")}">A−</button>
+        <span id="setLiveSizeLabel">${liveCcSizeOf(settingsCache.liveCcSize)}</span>
+        <button type="button" class="icon-btn" id="setLiveBigger" title="${t("字号增大")}">A+</button>
+        <div class="seg-toggle" id="setLiveFont">
+          <button type="button" class="seg-btn" data-font="sans">${t("无衬线")}</button>
+          <button type="button" class="seg-btn" data-font="serif">${t("衬线")}</button>
+          <button type="button" class="seg-btn" data-font="round">${t("圆体")}</button>
+          <button type="button" class="seg-btn" data-font="mono">${t("等宽")}</button>
+        </div>
+        <button type="button" class="btn" id="setCopyTranscript">${t("复制全文")}</button>
+      </div>
+    </div>
     <div class="drawer-actions" style="margin-top:8px">
       <button id="settingsSave" class="btn btn-primary" type="button">${t("保存")}</button>
       <span id="settingsSaved" hidden style="color:#3aa06a;margin-left:8px">${t("已保存")}</span>
@@ -3554,6 +3944,38 @@ function fillSettingsDrawer() {
     });
   });
   $("setVocabTest")?.addEventListener("click", () => openVocabTest());
+  paintWordPackBoxes();
+  $("setLiveCc")?.addEventListener("change", async () => {
+    await saveSettings({ liveCc: Boolean($("setLiveCc").checked) });
+    flashHint($("setLiveCc").checked ? t("片上字幕条已打开") : t("片上字幕条已关掉"));
+    if ($("setLiveCc").checked) checkAchievementsSoon("live");
+  });
+  paintLiveStyleSettings();
+  $("setLiveSmaller")?.addEventListener("click", async () => {
+    const next = liveCcSizeOf((Number(settingsCache.liveCcSize) || 16) - 1);
+    if (next === liveCcSizeOf(settingsCache.liveCcSize)) {
+      flashHint(t("已经最小。"));
+      return;
+    }
+    await saveSettings({ liveCcSize: next });
+    paintLiveStyleSettings();
+  });
+  $("setLiveBigger")?.addEventListener("click", async () => {
+    const next = liveCcSizeOf((Number(settingsCache.liveCcSize) || 16) + 1);
+    if (next === liveCcSizeOf(settingsCache.liveCcSize)) {
+      flashHint(t("已经最大。"));
+      return;
+    }
+    await saveSettings({ liveCcSize: next });
+    paintLiveStyleSettings();
+  });
+  $("setLiveFont")?.querySelectorAll("[data-font]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await saveSettings({ liveCcFont: liveCcFontOf(btn.dataset.font) });
+      paintLiveStyleSettings();
+    });
+  });
+  $("setCopyTranscript")?.addEventListener("click", () => copyAllTranscript());
   $("settingsSave").addEventListener("click", async () => {
     const next = {
       apiKey: $("setKey").value.trim(),
@@ -3564,6 +3986,8 @@ function fillSettingsDrawer() {
       uiLang: currentLang(),
       uiTheme: settingsCache.uiTheme || "paper",
       captionsOnly: Boolean($("setCaptionsOnly")?.checked),
+      liveCcSize: liveCcSizeOf(settingsCache.liveCcSize),
+      liveCcFont: liveCcFontOf(settingsCache.liveCcFont),
       ...readVocabSettings("set"),
       koulingUrl: $("setKoulingUrl")?.value.trim() || "",
     };
@@ -3972,13 +4396,13 @@ function exportQuotesMarkdown() {
 }
 
 function transcriptPlainText() {
-  const mode = state.transcriptMode || "original";
+  const mode = state.transcriptMode || preferredTranscriptMode();
   const lines = [];
   const title = String(state.title || "").trim();
   if (title) lines.push(title, "");
   for (const [i, seg] of state.segments.entries()) {
     const raw = String(seg.text || "").trim();
-    const zh = String(state.translations[i] || "").trim();
+    const zh = translationAt(i);
     const time = clock(seg.start);
     if (mode === "zh") {
       if (zh || raw) lines.push(`${time}  ${zh || raw}`);
@@ -4057,8 +4481,8 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
     selectedBlock: -1,
     dives: cached?.dives || {},
     scripts: cached?.scripts || {},
-    translations: cached?.translations || {},
-    transcriptMode: state.transcriptMode || "original",
+    translations: { ...(src.translations || {}), ...(cached?.translations || {}) },
+    transcriptMode: preferredTranscriptMode(),
     chat: cached?.chat || [],
     askContext: null,
     study: cached?.study || null,
@@ -4163,7 +4587,6 @@ function paintOpenedVideo() {
     loadResumeHint();
   }
   const needZh =
-    !captionsOnlyMode() &&
     state.transcriptMode !== "original" &&
     state.segments.some((_, i) => !translationAt(i));
   if (needZh) translateAll();
@@ -4527,6 +4950,7 @@ async function dropMark(opts = {}) {
   await saveList("vb_marks", marks);
   afterMarkChange();
   hintMarkDropped(mark);
+  checkAchievementsSoon();
   return mark;
 }
 
@@ -4902,6 +5326,7 @@ async function analyzeBlocks() {
     if (!result?.ok) throw new Error(result?.error || t("拆块失败"));
     state.gist = result.gist;
     state.blocks = result.blocks;
+    checkAchievementsSoon();
     renderBrickBar();
     renderBrickList();
     renderResume();
@@ -5103,7 +5528,16 @@ function setProgress(i, status, persist = true) {
   if (!state.blocks[i] || state.progress[i] === status) return;
   if (status === "learning" && state.progress[i] === "done") return;
   state.progress[i] = status;
-  if (status === "done") dropBrickCard(i);
+  if (status === "done") {
+    dropBrickCard(i);
+    const key = state.videoId ? `${state.videoId}:${i}` : "";
+    achieveStore.doneKeys = achieveStore.doneKeys || {};
+    if (key && !achieveStore.doneKeys[key]) {
+      achieveStore.doneKeys[key] = 1;
+      achieveStore.doneChapters = Object.keys(achieveStore.doneKeys).length;
+    }
+    checkAchievementsSoon();
+  }
   renderProgressMeter();
   const view = currentView();
   if (view === "bricks") {
@@ -5295,6 +5729,7 @@ async function loadConceptMap() {
     };
     await mergeAtlasLocal(state.conceptMap);
     saveCache();
+    checkAchievementsSoon("map");
     renderMaps();
     echoMarksCache = null;
     echoMarksKey = "";
@@ -6952,6 +7387,7 @@ async function startSpanLoop(span, opts = {}) {
     return false;
   }
   scrollToSeconds(span.start);
+  checkAchievementsSoon(state.shadowing ? "shadow" : "loop");
   return true;
 }
 
@@ -8092,11 +8528,18 @@ function buildTranscriptRow(i, { mode, echoes, golds }) {
 }
 
 function zhSlotHtml(i, zh = translationAt(i)) {
-    if (zh) return `<div class="t-zh">${decorateText(zh)}</div>`;
-  if (state.translateFailed?.[i] || (state.transcriptMode === "zh" && !isTranslating)) {
+  if (zh) return `<div class="t-zh">${decorateText(zh)}</div>`;
+  if (state.translateFailed?.[i]) {
     return `<div class="t-zh failed">${t("这句没翻出来")} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
   }
-  return `<div class="t-zh pending"><span class="zh-skel" aria-hidden="true"></span></div>`;
+  if (isTranslating) {
+    return `<div class="t-zh pending"><span class="zh-skel" aria-hidden="true"></span></div>`;
+  }
+  if (state.transcriptMode === "zh") {
+    const src = state.segments[i]?.text || "";
+    return `<div class="t-zh skipped">${decorateText(src)} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
+  }
+  return "";
 }
 
 function patchRowTranslation(i) {
@@ -8294,12 +8737,14 @@ async function translateAll() {
       }
       pending.forEach((i, k) => {
         const zh = cleanZh(result.translations[k] || "");
-        if (!isRealTranslation(zh, state.segments[i]?.text)) {
-          delete state.translations[i];
-          state.translateFailed[i] = true;
-        } else {
+        const kind = translationKind(zh, state.segments[i]?.text);
+        if (kind === "ok") {
           state.translations[i] = zh;
           delete state.translateFailed[i];
+        } else {
+          delete state.translations[i];
+          if (kind === "error") state.translateFailed[i] = true;
+          else delete state.translateFailed[i];
         }
         patchRowTranslation(i);
       });
@@ -8317,9 +8762,11 @@ async function translateAll() {
 }
 
 function setTranscriptMode(mode) {
-  state.transcriptMode = mode;
+  const next = mode === "zh" || mode === "original" ? mode : "bilingual";
+  state.transcriptMode = next;
+  void saveSettings({ transcriptMode: next });
   renderTranscript({ force: true });
-  if (mode !== "original") translateAll();
+  if (next !== "original") translateAll();
 }
 
 function runReaderSearch() {
@@ -8560,6 +9007,7 @@ async function addHighlight(color, style) {
       flashHint(t("已撤回划线"));
     },
   });
+  checkAchievementsSoon();
 }
 
 function afterHighlightChange(idxs = []) {
@@ -8639,6 +9087,7 @@ async function saveNote() {
     createdAt: Date.now(),
   });
   await saveList("vb_notes", notes);
+  checkAchievementsSoon();
   $("noteModal").hidden = true;
   pendingNote = null;
   renderNotes();
@@ -8925,6 +9374,7 @@ async function addVocabMany(items) {
   renderNotes();
   if (currentView() === "vocab") renderVocabPage();
   paintVocabChrome();
+  if (changed) checkAchievementsSoon();
   return changed;
 }
 
@@ -9136,7 +9586,7 @@ function renderVocabPreview() {
     return;
   }
   if (isScanningVocab) {
-    open(`<div class="vocab-preview-kicker">正在按「${esc(level.label)}」筛这篇的生词…</div>
+    open(`<div class="vocab-preview-kicker">${wordPackReady(level.id) ? t("正在按「{name}」本地筛这篇的生词…", { name: level.label }) : t("正在按「{name}」筛这篇的生词…", { name: level.label })}</div>
       <p>筛完会先给你一份生词库。想直接看字幕也可以 <button class="text-btn" type="button" id="vocabPreviewSkip">先看视频</button></p>`);
     $("vocabPreviewSkip")?.addEventListener("click", dismissVocabPreview);
     return;
@@ -9284,7 +9734,7 @@ function vocabScanHtml() {
         ? ` · ${level.label}`
         : "";
   return `<div class="vocab-scan">
-      <div class="note-meta">${t("按你的水平筛字幕里可能还不熟的词")}${esc(scoreHint)}</div>
+      <div class="note-meta">${wordPackReady(level.id) ? t("这篇用本地词包筛，不花 token") : t("按你的水平筛字幕里可能还不熟的词")}${esc(scoreHint)}</div>
       ${
         level.id === "off"
           ? `<p class="setup-lead" style="margin:0">${t("点顶栏「设词汇水平」，或在阅读页直接选四级、六级、雅思或托福。雅思/托福也可以填总分。")}</p>`
@@ -9882,6 +10332,21 @@ async function scanVideoVocab({ force = false } = {}) {
   const videoId = state.videoId;
   try {
     const known = new Set(vocab.map((v) => String(v.word || "").toLowerCase()));
+    if (wordPackReady(level.id)) {
+      const words = (globalThis.WordLevel?.scanLocal(state.segments, {
+        packWords: packKnownSet(level),
+        userKnown: known,
+        limit: 24,
+      }) || []).map((w) => ({
+        ...w,
+        why: w.why || t("不在「{name}」词包里", { name: level.label }),
+      }));
+      if (state.videoId !== videoId) return;
+      state.levelScan = { words, key, scanned: true, error: "", local: true };
+      vocabCardIndex = 0;
+      saveCache();
+      return;
+    }
     const tokens = globalThis.WordLevel?.candidates(state.segments, { known }) || [];
     if (!tokens.length) {
       state.levelScan = { words: [], key, scanned: true, error: "" };
@@ -10119,6 +10584,7 @@ async function openExport() {
   }
   await chrome.storage.local.set({ vb_export: payload });
   chrome.tabs.create({ url: chrome.runtime.getURL("export.html") });
+  checkAchievementsSoon("export");
 }
 
 function looksZh(text) {
@@ -10326,6 +10792,7 @@ async function extractGoldQuotes({ quiet = false, force = false } = {}) {
     state.quoteExtracted = true;
     state.quoteError = "";
     await saveList("vb_quotes", quotes);
+    if (fresh.length) checkAchievementsSoon();
     saveCache();
     renderQuoteRail();
     paintGoldRows();
@@ -10599,6 +11066,7 @@ async function saveQuote(seconds, text, videoId = state.videoId, videoTitle = st
   });
   if (quotes.length > 400) quotes.length = 400;
   await saveList("vb_quotes", quotes);
+  checkAchievementsSoon();
   renderNotes();
   return true;
 }
@@ -10687,6 +11155,37 @@ async function applyHotkey(payload) {
       return;
     }
     await dropMark({ seconds: t, label: line, videoId: vid, videoTitle: title });
+    return;
+  }
+  if (payload.action === "peek") {
+    if (vid && state.videoId && vid !== state.videoId) return;
+    followPlayback = true;
+    followPausedByUser = false;
+    followLockUntil = Date.now() + 600;
+    switchView("read");
+    seek(t);
+    updateFollowBtn();
+    return;
+  }
+  if (payload.action === "highlight") {
+    const stored = await chrome.storage.local.get("vb_highlights");
+    if (Array.isArray(stored.vb_highlights)) highlights = stored.vb_highlights;
+    afterHighlightChange([segmentIndexAt(t)]);
+    return;
+  }
+  if (payload.action === "define") {
+    const word = String(payload.text || "").trim();
+    if (!word) return;
+    switchView("read");
+    openWordCard(word, { sentence: line, seconds: t });
+    return;
+  }
+  if (payload.action === "vocab") {
+    const word = String(payload.text || "").trim();
+    if (word) {
+      await addVocab(word, line, t);
+      openWordCard(word, { sentence: line, seconds: t });
+    }
     return;
   }
   if (payload.action === "loop") {
@@ -11038,6 +11537,7 @@ async function gradeCard(card, grade, opts = {}) {
     card.due = now + card.interval * DAY;
   }
   await saveList("vb_cards", cards);
+  if (grade !== "again") checkAchievementsSoon();
   if (reviewFocusId === card.id) reviewFocusId = "";
   reviewRevealed = false;
   vocabReviewRevealed = false;
@@ -11512,6 +12012,7 @@ async function askVideo(question) {
   const quote = state.askContext?.type === "quote" ? state.askContext.text : "";
   const payload = buildAskPayload(question.trim());
   state.chat.push({ role: "user", content: question.trim(), quote });
+  checkAchievementsSoon("ask");
   renderChat();
   $("askSend").disabled = true;
   try {
@@ -11654,7 +12155,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
   bindCoreClicks();
   closeClickBlockers();
-  await Promise.all([loadSettings(), loadLists()]);
+  await Promise.all([loadSettings(), loadLists(), loadWordPacks()]);
+  syncLangButtons();
+  checkAchievements({ silent: true }).catch(() => {});
   if (pendingWatchInfo) takeIncomingWatch(pendingWatchInfo);
   await syncVocabCards();
   if (settingsCache.kouling) koulingPull({ silent: true }).catch(() => {});
@@ -11744,6 +12247,44 @@ document.addEventListener("DOMContentLoaded", async () => {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.vb_inbox?.newValue) {
       applyHotkey(changes.vb_inbox.newValue);
+    }
+    if (area === "local" && changes.vb_settings?.newValue) {
+      const incoming = changes.vb_settings.newValue;
+      settingsCache = { ...settingsCache, ...incoming };
+      if ($("setLiveCc") && typeof incoming.liveCc === "boolean") {
+        $("setLiveCc").checked = incoming.liveCc;
+      }
+      paintLiveStyleSettings();
+      const nextMode = incoming.transcriptMode;
+      if (
+        nextMode &&
+        nextMode !== state.transcriptMode &&
+        (nextMode === "original" || nextMode === "zh" || nextMode === "bilingual")
+      ) {
+        state.transcriptMode = nextMode;
+        renderTranscript({ force: true });
+        syncLangButtons();
+        if (nextMode !== "original") translateAll();
+      }
+    }
+    if (area === "local" && Array.isArray(changes.vb_highlights?.newValue)) {
+      highlights = changes.vb_highlights.newValue;
+      afterHighlightChange();
+    }
+    const cacheKey = state.videoId ? `vb_cache_${state.videoId}` : "";
+    const incomingZh = cacheKey && changes[cacheKey]?.newValue?.translations;
+    if (area === "local" && incomingZh && state.segments.length) {
+      let added = false;
+      Object.entries(incomingZh).forEach(([k, v]) => {
+        const i = Number(k);
+        if (!Number.isInteger(i) || translationAt(i)) return;
+        const zh = cleanZh(v);
+        if (!isRealTranslation(zh, state.segments[i]?.text)) return;
+        state.translations[i] = zh;
+        added = true;
+        patchRowTranslation(i);
+      });
+      if (added) renderTranslateBar();
     }
   });
   chrome.runtime.onMessage.addListener((message) => {
@@ -11894,6 +12435,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     openTutorial(true);
   });
   $("reviewTopBtn")?.addEventListener("click", () => goReview());
+  $("achieveTopBtn")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const pop = $("achievePop");
+    setAchievePop(Boolean(pop?.hidden));
+  });
   $("exportTopBtn")?.addEventListener("click", openExport);
   $("exportBtn")?.addEventListener("click", openExport);
 
@@ -11901,6 +12447,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.stopPropagation();
     $("moreMenu") && ($("moreMenu").hidden = true);
     setVocabPop(false);
+    setAchievePop(false);
     const pop = $("themePop");
     const willOpen = Boolean(pop?.hidden);
     if (willOpen) paintThemeChrome();
@@ -11913,6 +12460,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("moreBtn").setAttribute("aria-expanded", String(!menu.hidden));
     if (!menu.hidden) {
       setVocabPop(false);
+      setAchievePop(false);
       if ($("themePop")) $("themePop").hidden = true;
     }
   });
@@ -11920,6 +12468,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.stopPropagation();
     const pop = $("vocabLevelPop");
     setVocabPop(Boolean(pop?.hidden));
+    setAchievePop(false);
     if ($("themePop")) $("themePop").hidden = true;
   });
   document.addEventListener("click", (event) => {
@@ -11929,6 +12478,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if ($("themePop")) $("themePop").hidden = true;
     if (event.target.closest?.("#vocabLevelPop") || event.target.closest?.("#vocabLevelBtn")) return;
     setVocabPop(false);
+    if (event.target.closest?.("#achievePop") || event.target.closest?.("#achieveTopBtn")) return;
+    setAchievePop(false);
   });
 
   $("settingsTopBtn")?.addEventListener("click", () => toggleSettings());

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const siteSrc = fs.readFileSync(path.join(root, "site.js"), "utf8");
+const wordLevel = fs.readFileSync(path.join(root, "word-level.js"), "utf8");
+const freqSrc = fs.readFileSync(path.join(root, "packs", "english-freq.txt"), "utf8");
 const ctx = { URL, console };
 vm.createContext(ctx);
 vm.runInContext(siteSrc, ctx);
@@ -21,6 +23,8 @@ const {
   formatClock,
   parseClockInput,
   sameAsSource,
+  alignCaptionTranslations,
+  captionTlang,
 } = ctx;
 
 function opened(extra = {}) {
@@ -105,6 +109,16 @@ assert.equal(parseClockInput("1:30:00"), 5400);
 assert.equal(parseClockInput("1:30"), 90);
 assert.equal(sameAsSource("Hello, world!", "hello world"), true);
 assert.equal(sameAsSource("你好世界", "Hello world"), false);
+assert.equal(captionTlang("zh-CN"), "zh-Hans");
+assert.equal(captionTlang("zh-TW"), "zh-Hant");
+{
+  const aligned = alignCaptionTranslations(
+    [{ start: 0, end: 2, text: "Hello" }, { start: 2, end: 4, text: "World" }],
+    [{ start: 0.1, end: 1.9, text: "你好" }, { start: 2.1, end: 3.8, text: "世界" }],
+  );
+  assert.equal(aligned[0], "你好");
+  assert.equal(aligned[1], "世界");
+}
 
 // 旧轮询的致命顺序：先写 state.tabId，再比 tab.id，保护永远失效
 const broken = { tabId: 11, videoId: "abc123", segments: 40 };
@@ -190,16 +204,109 @@ assert.match(markFaceUrl("cat"), /mark-cat-golden/);
 assert.match(markFaceUrl("dog"), /mark-dog-samoyed/);
 assert.equal(markFaceUrl("ribbon"), "");
 assert.match(content, /document\.body\.appendChild\(next\)/, "K 条要挂在页面上，不能埋进播放器图层");
-assert.match(content, /VB_CONTENT_REV = 9/, "重载后要升 rev，才能重装 K");
+assert.match(content, /VB_CONTENT_REV = 22/, "重载后要升 rev，才能重装 K");
+assert.doesNotMatch(content, /data-mode="original"/, "字幕语言不要堆在片子上反复点");
+assert.match(content, /liveModeOf\(stored\.vb_settings\?\.transcriptMode\)/, "片上字幕要跟侧栏记住的双语");
+assert.match(content, /function bindLivePointerGuard/, "片子上要点得着，先在页面上拦住播放器");
+assert.match(content, /addEventListener\(type, on, true\)/, "全屏时要在捕获阶段挡住播放器");
+assert.doesNotMatch(content, /pointerdown[\s\S]{0,80}preventDefault/, "pointerdown 上 preventDefault 会把 click 吃掉");
+assert.match(content, /function liveBarBusy/, "按着的时候不能拆掉词按钮");
+assert.match(content, /function paintLiveWordFlags/, "点词只改高亮，不要重写整行");
+assert.match(content, /function liveSelectionText/, "字幕条上要能划选再划线");
+assert.match(content, /function sendLiveBg/, "查词失败要把后台原因带回条子");
+assert.match(content, /data-act="retry"/, "查词失败后要能再试一次");
+assert.match(content, /function liveCaptionReady/, "没拉到字幕时不能把系统 CC 藏掉");
+assert.match(panel, /async function saveSettings[\s\S]{0,280}chrome\.storage\.local\.get\("vb_settings"\)/, "侧栏存设置前要先读回页面上改过的开关");
+assert.match(panel, /setLiveCc"\)\.checked = incoming\.liveCc/, "K 条开了字幕条，设置里的开关要跟着变");
+assert.match(content, /fullscreenElement/, "全屏时条子要跟进播放器");
+assert.match(content, /wordsKey !== liveWordsKey/, "对照刷新时不能拆掉正在点的词");
+assert.match(panelHtml, /id="modeBilingual" class="seg-btn active"/, "侧栏默认就是双语");
+assert.match(panel, /transcriptMode = "bilingual"/, "没设过语言时要写成双语并记住");
+assert.match(content, /kz-lex/, "片上点词要出悬浮词卡");
+assert.match(content, /action: "vbDefine"/, "词卡要在页面上直接查，不进侧栏");
+assert.match(panel, /action === "highlight"/, "片上划线要能写进侧栏原文");
+assert.match(content, /style\?\.dataset\.rev === String\(VB_CONTENT_REV\)/, "样式不能每两秒重写一遍");
+assert.doesNotMatch(content, /observe\(player, \{ childList: true, subtree: true \}\)/, "不能整棵监听播放器 DOM");
+assert.match(content, /setTimeout\(pulse, 220\)/, "片上字幕条不能逐帧重画");
+assert.match(content, /oldRev >= VB_CONTENT_REV/, "旧页要能丢掉旧世界再装新条");
+assert.match(content, /kz-live/, "片上字幕要走自己的条，不改系统 CC");
+assert.match(content, /kz-live-on/, "打开片上字幕条时系统 CC 要淡出");
+assert.match(content, /kz-live-pane/, "换句要用交叉淡入，不要硬切");
+assert.match(content, /data-act="cc"/, "K 条仍能开关片上字幕条");
+assert.match(content, /kz-cc-w/, "片上点词只包我们自己的条");
+assert.match(content, /liveCc === true/, "片上字幕条默认关，要显式打开");
+assert.match(content, /liveCcSize/, "片上字号要记进设置");
+assert.match(content, /liveCcFont/, "片上字体要记进设置");
+assert.match(content, /tlang/, "YouTube 双语要走平台自带译文轨");
+assert.match(content, /alignCaptionTranslations/, "双语要对齐到原句时间");
+assert.match(content, /fillLiveZh/, "片上双语不能只等侧栏翻完");
+assert.doesNotMatch(content, /data-act="bigger"/, "字号不要堆在字幕条上");
+assert.match(panel, /id="setLiveCc"/, "设置里要有片上字幕条开关");
+assert.match(panel, /id="setLiveStyle"/, "字幕样式要放在设置里");
+assert.match(panel, /id="setCopyTranscript"/, "一键复制全文要放在设置里");
+assert.match(siteSrc, /function alignCaptionTranslations/, "双语对齐要能单测");
+assert.match(bg, /translations: res\.translations/, "侧栏打开时要带上平台译文");
+assert.match(panelCss, /\.check\.switch input/, "设置开关要是拨动样子");
+assert.match(panel, /action === "peek"/, "跳这句要能对齐侧栏");
 assert.match(content, /pageUnavailable/, "不可播的页要能上报");
 assert.match(bg, /hasCore \? \["content\.js"\]/, "已注入过的页不能再跑 i18n.js");
 assert.match(panel, /20000/, "字幕链路要有硬超时");
 assert.match(panel, /function clearOpenedVideo/, "当前页不可读时必须清空阅读器");
 assert.match(panel, /captionsOnly/, "要有只要字幕开关");
+assert.match(panel, /function preferredTranscriptMode/, "阅读默认双语");
+assert.match(panel, /transcriptMode: "bilingual"/, "初始状态就是双语");
 assert.match(panel, /function isRealTranslation/, "失败或原文不能当译文");
 assert.match(panel, /followPausedByUser/, "跟随只能暂时停");
 assert.match(panel, /decorateTextNodes/, "decorate 只能改文本节点");
 assert.match(content, /__vbRemountDock/, "已打开的视频页要能拆掉旧 K 再绑");
+assert.match(panelHtml, /id="achievePop"/, "顶栏成就要有抽屉");
+assert.match(panel, /function checkAchievements/, "学过的痕迹要能解锁成就");
+assert.match(panel, /vb_achieve/, "成就要记在本机");
+assert.match(panel, /doneKeys/, "同一块反复标已学会不能再加一次");
+assert.match(panelCss, /\.achieve-card/, "成就抽屉要有卡片样式");
+{
+  const achieveSrc = fs.readFileSync(path.join(root, "achieve.js"), "utf8");
+  const aCtx = {};
+  vm.createContext(aCtx);
+  vm.runInContext(achieveSrc, aCtx);
+  const api = aCtx.Achieve;
+  const empty = api.emptyStore();
+  assert.equal(api.evaluate({}, empty).fresh.length, 0);
+  const first = api.evaluate({ videos: 1, words: 1, highlights: 1, doneChapters: 1 }, empty);
+  assert.ok(first.fresh.includes("first_watch"));
+  assert.ok(first.fresh.includes("first_word"));
+  assert.ok(first.fresh.includes("first_done"));
+  assert.equal(api.evaluate({ videos: 1 }, { unlocked: first.unlocked }).fresh.length, 0);
+  assert.equal(api.dayKey(Date.parse("2026-08-22T12:00:00")), "2026-08-22");
+  assert.equal(api.streak(["2026-08-20", "2026-08-21", "2026-08-22"], "2026-08-22"), 3);
+  assert.equal(api.streak(["2026-08-20", "2026-08-22"], "2026-08-22"), 1);
+  assert.equal(api.touchDays(["2026-08-21"], Date.parse("2026-08-22T18:00:00")).streak, 2);
+  assert.equal(api.unseen({ unlocked: { a: 1, b: 1 }, seen: { a: true } }), 1);
+  const pile = api.evaluate({ words: 30, videos: 5, chapters: 5, reviews: 20 }, empty);
+  assert.ok(pile.fresh.includes("words_30"));
+  assert.ok(pile.fresh.includes("videos_5"));
+  assert.ok(!pile.fresh.includes("words_100"));
+  assert.ok(!pile.fresh.includes("videos_20"));
+}
+assert.match(panel, /function installWordPack/, "词汇包要能下载到本机");
+assert.match(panel, /scanLocal/, "有词包时筛生词要走本地，不花 token");
+assert.match(wordLevel, /function scanLocal/, "本地筛词要能单测");
+assert.match(freqSrc, /^the\n/m, "词频表要能装进扩展");
+assert.ok(freqSrc.trim().split(/\s+/).length > 8000, "词频表要够切出雅思托福");
+{
+  const packCtx = { console };
+  vm.createContext(packCtx);
+  vm.runInContext(wordLevel, packCtx);
+  const known = packCtx.WordLevel.knownFromFreq(["the", "of", "and", "leverage", "ubiquitous"], 3);
+  assert.equal(known.has("the"), true);
+  assert.equal(known.has("leverage"), false);
+  const hits = packCtx.WordLevel.scanLocal(
+    [{ text: "The team will leverage ubiquitous tools today.", start: 12 }],
+    { packWords: known, userKnown: [], limit: 10 },
+  );
+  assert.ok(hits.some((w) => w.word === "leverage"));
+  assert.ok(!hits.some((w) => w.word === "the" || w.word === "team"));
+}
 assert.match(fs.readFileSync(path.join(root, "i18n.js"), "utf8"), /"拆解已收起。"|"正在对照…"/);
 try {
   new Function(fs.readFileSync(path.join(root, "i18n.js"), "utf8"));

@@ -18,6 +18,7 @@ const keep = [
   "panel.css",
   "panel.js",
   "word-level.js",
+  "achieve.js",
   "card-studio.js",
   "site.js",
   "i18n.js",
@@ -37,6 +38,8 @@ fs.mkdirSync(path.join(stage, "icons"), { recursive: true });
 for (const size of [16, 48, 128]) {
   fs.copyFileSync(path.join(root, "icons", `icon${size}.png`), path.join(stage, "icons", `icon${size}.png`));
 }
+fs.mkdirSync(path.join(stage, "packs"), { recursive: true });
+fs.copyFileSync(path.join(root, "packs", "english-freq.txt"), path.join(stage, "packs", "english-freq.txt"));
 
 const staged = path.join(stage, "*");
 const win = process.platform === "win32";
