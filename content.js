@@ -6,7 +6,7 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 29;
+const VB_CONTENT_REV = 30;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
@@ -1014,6 +1014,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   let liveFetchedAt = "";
   let liveZhAsked = new Set();
   let liveZhFail = new Set();
+  let liveZhTries = {};
   let livePtrHoldT = 0;
   let liveDragging = false;
   let liveMarkLine = null;
@@ -2108,7 +2109,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!res?.ok) {
         want.forEach((i) => {
           liveZhAsked.delete(i);
-          liveZhFail.add(i);
+          liveZhTries[i] = (liveZhTries[i] || 0) + 1;
+          if (liveZhTries[i] >= 2) liveZhFail.add(i);
         });
         return;
       }
@@ -2119,14 +2121,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (zh) {
           liveTranslations[i] = zh;
           liveZhFail.delete(i);
+          delete liveZhTries[i];
           wrote = true;
         } else {
-          liveZhFail.add(i);
+          liveZhTries[i] = (liveZhTries[i] || 0) + 1;
+          if (liveZhTries[i] >= 2) liveZhFail.add(i);
         }
       });
       if (wrote) persistLiveTranslations();
     } catch (_e) {
-      want.forEach((i) => liveZhFail.add(i));
+      want.forEach((i) => {
+        liveZhTries[i] = (liveZhTries[i] || 0) + 1;
+        if (liveZhTries[i] >= 2) liveZhFail.add(i);
+      });
     } finally {
       want.forEach((i) => liveZhAsked.delete(i));
     }
@@ -2673,6 +2680,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     liveFetchedAt = "";
     liveZhAsked = new Set();
     liveZhFail = new Set();
+    liveZhTries = {};
     liveZhBusy = false;
     liveWord = "";
     closeLexCard();

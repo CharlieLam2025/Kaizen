@@ -177,6 +177,21 @@ function sameAsSource(zh, en) {
   return Boolean(a && b && a === b);
 }
 
+function pickTranslateRows(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.t)) return parsed.t;
+  if (Array.isArray(parsed?.translations)) return parsed.translations;
+  if (parsed && typeof parsed === "object") {
+    const keys = Object.keys(parsed)
+      .filter((k) => /^\d+$/.test(k))
+      .sort((a, b) => Number(a) - Number(b));
+    if (keys.length) return keys.map((k) => parsed[k]);
+  }
+  return [];
+}
+
+var TRANSLATE_BATCH = 10;
+
 function watchUrl(videoId, seconds) {
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
   const bili = parseBiliId(videoId);

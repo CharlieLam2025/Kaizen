@@ -119,6 +119,7 @@ const state = {
   levelScan: null,
   vocabPreviewDone: false,
   translateFailed: {},
+  translateTries: {},
 };
 
 let loadingVideoId = null;
@@ -978,7 +979,7 @@ let pendingWatchInfo = null;
 
 function markWatchStage(stage, extra = {}) {
   chrome.storage.local
-    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.7", ...extra } })
+    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.8", ...extra } })
     .catch(() => {});
 }
 
@@ -1041,6 +1042,7 @@ function clearOpenedVideo(reason) {
     study: null,
     lastSeconds: 0,
     translateFailed: {},
+    translateTries: {},
   });
   transcriptFailId = "";
   transcriptFailAt = 0;
@@ -4549,6 +4551,7 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
     levelScan: cachedScan && cachedScan.key === `${videoId}:${level.key}` ? cachedScan : null,
     vocabPreviewDone: Boolean(cached?.vocabPreviewDone && cached?.vocabPreviewKey === `${videoId}:${level.key}`),
     translateFailed: {},
+    translateTries: {},
   });
   playbackRate = nearestPlayRate(settingsCache.playRate);
   watchRate = playbackRate;
@@ -8652,7 +8655,9 @@ function renderTranslateBar() {
 
 function retryTranslationAt(i) {
   if (!state.translateFailed) state.translateFailed = {};
+  if (!state.translateTries) state.translateTries = {};
   delete state.translateFailed[i];
+  delete state.translateTries[i];
   delete state.translations[i];
   patchRowTranslation(i);
   renderTranslateBar();
@@ -8663,6 +8668,7 @@ function retryFailedTranslations() {
   Object.keys(state.translateFailed || {}).forEach((k) => {
     delete state.translations[k];
     delete state.translateFailed[k];
+    delete state.translateTries?.[k];
     patchRowTranslation(Number(k));
   });
   renderTranslateBar();
@@ -8777,14 +8783,22 @@ async function translateAll() {
   translateAll.busy = true;
   isTranslating = true;
   if (!state.translateFailed) state.translateFailed = {};
+  if (!state.translateTries) state.translateTries = {};
   const videoId = state.videoId;
   const job = videoJob;
+  let batchFails = 0;
   renderTranslateBar();
   try {
     while (job === videoJob && state.videoId === videoId && state.transcriptMode !== "original") {
       const pending = [];
-      for (let i = 0; i < state.segments.length && pending.length < 40; i++) {
-        if (!translationAt(i) && !state.translateFailed[i]) pending.push(i);
+      const batch = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 10;
+      for (let i = 0; i < state.segments.length && pending.length < batch; i++) {
+        if (translationAt(i) || state.translateFailed[i]) continue;
+        if ((state.translateTries[i] || 0) >= 2) {
+          state.translateFailed[i] = true;
+          continue;
+        }
+        pending.push(i);
       }
       if (!pending.length) break;
       const result = await sendToBg({
@@ -8793,30 +8807,41 @@ async function translateAll() {
       });
       if (job !== videoJob || state.videoId !== videoId) break;
       if (!result?.ok) {
+        batchFails += 1;
+        const fatal = /NO_KEY|401|402|钥匙|额度|欠费/i.test(result?.error || "");
         pending.forEach((i) => {
-          if (!translationAt(i)) {
+          state.translateTries[i] = (state.translateTries[i] || 0) + 1;
+          if (fatal || state.translateTries[i] >= 2) {
             delete state.translations[i];
             state.translateFailed[i] = true;
           }
           patchRowTranslation(i);
         });
-        flashHint(friendlyAiError(result?.error, t("这批没翻出来，点重试。")));
-        break;
+        if (fatal || batchFails >= 3) {
+          flashHint(friendlyAiError(result?.error, t("这批没翻出来，点重试。")));
+          break;
+        }
+        await new Promise((ok) => setTimeout(ok, 900));
+        continue;
       }
+      batchFails = 0;
       pending.forEach((i, k) => {
         const zh = cleanZh(result.translations[k] || "");
         const kind = translationKind(zh, state.segments[i]?.text);
         if (kind === "ok") {
           state.translations[i] = zh;
           delete state.translateFailed[i];
+          delete state.translateTries[i];
         } else {
           delete state.translations[i];
-          state.translateFailed[i] = true;
+          state.translateTries[i] = (state.translateTries[i] || 0) + 1;
+          if (state.translateTries[i] >= 2) state.translateFailed[i] = true;
         }
         patchRowTranslation(i);
       });
       renderTranslateBar();
       backfillHandQuoteZh();
+      await new Promise((ok) => setTimeout(ok, 220));
     }
   } finally {
     translateAll.busy = false;
