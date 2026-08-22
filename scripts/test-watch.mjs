@@ -204,7 +204,7 @@ assert.match(markFaceUrl("cat"), /mark-cat-golden/);
 assert.match(markFaceUrl("dog"), /mark-dog-samoyed/);
 assert.equal(markFaceUrl("ribbon"), "");
 assert.match(content, /document\.body\.appendChild\(next\)/, "K 条要挂在页面上，不能埋进播放器图层");
-assert.match(content, /VB_CONTENT_REV = 22/, "重载后要升 rev，才能重装 K");
+assert.match(content, /VB_CONTENT_REV = 29/, "重载后要升 rev，才能重装 K");
 assert.doesNotMatch(content, /data-mode="original"/, "字幕语言不要堆在片子上反复点");
 assert.match(content, /liveModeOf\(stored\.vb_settings\?\.transcriptMode\)/, "片上字幕要跟侧栏记住的双语");
 assert.match(content, /function bindLivePointerGuard/, "片子上要点得着，先在页面上拦住播放器");
@@ -215,7 +215,54 @@ assert.match(content, /function paintLiveWordFlags/, "点词只改高亮，不�
 assert.match(content, /function liveSelectionText/, "字幕条上要能划选再划线");
 assert.match(content, /function sendLiveBg/, "查词失败要把后台原因带回条子");
 assert.match(content, /data-act="retry"/, "查词失败后要能再试一次");
-assert.match(content, /function liveCaptionReady/, "没拉到字幕时不能把系统 CC 藏掉");
+assert.match(content, /function liveCaptionReady[\s\S]{0,80}liveSegments\.length > 0/, "没拉到字幕轨时不能把系统 CC 藏掉");
+assert.match(content, /"pointerup"/, "松手也要拦住播放器");
+assert.match(content, /liveDragging/, "划词拖着时不能拆掉词按钮");
+assert.match(content, /timeupdate/, "句切要跟播放头，不能只靠 220ms 定时器");
+assert.match(content, /function liveSegFinger/, "侧栏写缓存时不能整轨重拉片上字幕");
+assert.match(content, /Math\.floor\(segs\.length \/ 2\)/, "轨指纹要抽中段，不能只比首尾");
+assert.match(content, /function pickLiveSegs\(live, pack\)/, "选轨要吃整包，不能只传数组");
+assert.match(content, /tLive > tPack/, "新轨即使更短也要盖过旧长缓存");
+assert.match(content, /function persistLiveTranslations[\s\S]{0,280}if \(!pack\) return/, "片子上只合并译文，不能改轨或抬 savedAt");
+assert.match(content, /function fillLiveEn/, "按住划词时英文也要换成这一句");
+assert.match(content, /liveWordsKey = ""/, "松手后要重建词按钮");
+assert.match(content, /paintKey === livePaintKey && !geomDirty && \(busy \|\| liveWordsKey\)/, "松手后 paintKey 相同也要重建词按钮");
+assert.match(content, /function syncLiveVideo/, "B 站换片也要丢掉上一支的轨");
+assert.match(content, /function liveStill/, "拉轨和补译回来后要确认还是这一支");
+assert.match(content, /function applyLiveSegs/, "换轨要丢掉黏着的旧句");
+assert.match(content, /!segs\.length && liveSegId === id/, "驱逐后 storage 空轨必须清片上内存");
+assert.match(content, /resetLiveTrack\(\)/, "空轨要走统一清场");
+assert.match(bg, /!tab\.active/, "后台页的 tick 不能改正在看的片");
+assert.match(panel, /activeWatch/, "前台 tab 换片要马上认，不能等下一轮轮询");
+assert.match(panel, /state\._trackAt/, "同片再开要先比轨是不是新的");
+assert.match(content, /addEventListener\("scroll"/, "滚动时条子要跟上播放器");
+assert.match(content, /onGeom\._raf/, "滚动重放条子要合到一帧，不能每像素都量");
+assert.match(panel, /info\.videoId !== state\.videoId/, "其它页的播放头不能带动这一支");
+assert.match(content, /liveSegFinger\(a\) === liveSegFinger\(b\)/, "只写译文不能靠 savedAt 把旧长轨抢回来");
+assert.match(content, /wasFs === nowFs/, "B 站 class 抖一下不能重放条子");
+assert.match(content, /bpx-state-web-fullscreen/, "B 站网页全屏要跟进条子");
+assert.match(panel, /translateAll\.busy/, "快切视频时漏翻的翻译要能再进");
+assert.match(panel, /kind === "ok"/, "空译文或回声不能当成功");
+assert.match(panel, /state\.translateFailed\[i\] = true/, "翻失败要标出来，不能一直转骨架");
+assert.match(panel, /function refreshLoopChrome/, "阅读页循环不能整表重绘知识块");
+assert.match(panel, /currentView\(\) === "bricks"/, "循环按钮只在拆页才重画砖条");
+assert.match(panel, /Math\.abs\(delta\) < 72/, "跟随要有滞回，不能每句硬跳");
+assert.match(panel, /lastPlayheadAt/, "port 已经在跟随时不要再 280ms 问一遍");
+assert.match(panel, /liveAt > cacheAt/, "侧栏开片也要比保存时间，不能只比轨长");
+assert.match(panel, /const savedAt = Date\.now\(\)/, "cache 和 vb_live 要同一时间戳");
+assert.match(panel, /paintOneTranscriptRow\(i\)/, "划线后不要整页拆掉字幕");
+assert.match(panel, /refreshTranscriptWhenIdle\.gen/, "长字幕刷新要分帧，不能一次 replace 几百行");
+assert.match(panel, /if \(nid === markNearId\) return/, "跟随不要每 tick 扫一遍书签钉");
+assert.match(panel, /saveCacheSoon\(6000\)/, "播放中不要每 15 秒写整包缓存");
+assert.doesNotMatch(panel, /setInterval\(\(\) => \{\s*if \(state\.videoId\) saveCache\(\)/, "不要定时全量 saveCache");
+assert.match(panelCss, /\.t-row\.playing \.zh-skel/, "译文骨架动画只开在正在读的那一行");
+assert.doesNotMatch(panel, /state\.segments\.length > 80/, "长字幕刷新不能整页拆成骨架");
+assert.match(panel, /pollTick\._again/, "换 tab 时轮询忙着也要补跑一次");
+assert.match(panel, /start === lastFollowedStart\) return/, "跟读锁住时换句仍要跟上");
+assert.match(panel, /const ok = await startSpanLoop\(span\)/, "选区循环失败不能假装成功");
+assert.match(panelCss, /\.top-actions \{[\s\S]*overflow-x:\s*auto/, "顶栏挤了要能横滑");
+assert.match(panelCss, /\.top-actions \{[\s\S]*min-width:\s*0/, "顶栏要能收缩，overflow 才生效");
+assert.match(panel, /transcriptFailId \|\| loadingVideoId \|\| state\.videoId/, "重试要加载失败的那支，不能回到旧片");
 assert.match(panel, /async function saveSettings[\s\S]{0,280}chrome\.storage\.local\.get\("vb_settings"\)/, "侧栏存设置前要先读回页面上改过的开关");
 assert.match(panel, /setLiveCc"\)\.checked = incoming\.liveCc/, "K 条开了字幕条，设置里的开关要跟着变");
 assert.match(content, /fullscreenElement/, "全屏时条子要跟进播放器");
@@ -306,6 +353,11 @@ assert.ok(freqSrc.trim().split(/\s+/).length > 8000, "词频表要够切出雅�
   );
   assert.ok(hits.some((w) => w.word === "leverage"));
   assert.ok(!hits.some((w) => w.word === "the" || w.word === "team"));
+  const head = packCtx.WordLevel.scanLocal(
+    [{ text: "Leverage the ubiquitous tools today.", start: 0 }],
+    { packWords: known, userKnown: [], limit: 10 },
+  );
+  assert.ok(head.some((w) => w.word === "leverage"), "句首生词不能当专有名词丢掉");
 }
 assert.match(fs.readFileSync(path.join(root, "i18n.js"), "utf8"), /"拆解已收起。"|"正在对照…"/);
 try {

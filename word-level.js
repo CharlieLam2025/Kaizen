@@ -448,7 +448,7 @@ function scanLocal(segments, { packWords, userKnown, limit = 24 } = {}) {
     }
   }
   return [...map.values()]
-    .filter((row) => row.cap < row.count)
+    .filter((row) => !(row.count >= 2 && row.cap === row.count))
     .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word))
     .slice(0, Math.max(1, Number(limit) || 24))
     .map((row) => ({

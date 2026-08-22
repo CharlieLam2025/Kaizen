@@ -68,7 +68,7 @@ const RELOAD_TAB_MATCH = [
 ];
 
 function rememberWatch(tab, videoId) {
-  if (!tab?.id) return;
+  if (!tab?.id || !tab.active) return;
   const url = tabHref(tab);
   if (!isWatchHost(url)) return;
   const snap = {
@@ -1450,7 +1450,9 @@ async function handleBiliTranscript({ videoId }) {
 async function youtubeTranscriptFromTab(videoId) {
   const stored = await chrome.storage.local.get("vb_watch");
   const tabIds = [];
-  if (stored.vb_watch?.tabId) tabIds.push(stored.vb_watch.tabId);
+  if (stored.vb_watch?.tabId && (!stored.vb_watch.videoId || stored.vb_watch.videoId === videoId)) {
+    tabIds.push(stored.vb_watch.tabId);
+  }
   try {
     const tabs = await chrome.tabs.query({
       url: [

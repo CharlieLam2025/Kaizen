@@ -163,6 +163,7 @@ let followPlayback = true;
 let followLockUntil = 0;
 let lastFollowedRow = null;
 let lastFollowedStart = -1;
+let lastPlayheadAt = 0;
 let programmaticScroll = false;
 let lastUserScrollAt = 0;
 let heavyWorkTimer = 0;
@@ -659,7 +660,7 @@ function centerRowInView(row, { smooth = true } = {}) {
   const mid = holderIsPage ? readingMidY() : holder.getBoundingClientRect().top + holder.clientHeight * 0.42;
   const rect = row.getBoundingClientRect();
   const delta = rect.top + rect.height / 2 - mid;
-  if (Math.abs(delta) < 14) return false;
+  if (Math.abs(delta) < 72) return false;
   const far = Math.abs(delta) > 220;
   const useSmooth = smooth && far;
   lockFollowScroll(useSmooth ? 700 : 800);
@@ -670,11 +671,6 @@ function centerRowInView(row, { smooth = true } = {}) {
   } else {
     holder.scrollTop += delta;
   }
-  requestAnimationFrame(() => {
-    if (!isReadView() || lastFollowedRow !== row) return;
-    if (isRowNearCenter(row, 56)) return;
-    row.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
-  });
   return true;
 }
 
@@ -709,8 +705,26 @@ function paintGoldRows() {
 function refreshTranscriptWhenIdle() {
   if (currentView() !== "read" || !state.segments.length) return;
   const id = state.videoId;
+  refreshTranscriptWhenIdle.gen = (refreshTranscriptWhenIdle.gen || 0) + 1;
+  const gen = refreshTranscriptWhenIdle.gen;
+  let i = 0;
   const run = () => {
-    if (state.videoId === id && currentView() === "read") renderTranscript({ force: true });
+    if (gen !== refreshTranscriptWhenIdle.gen) return;
+    if (state.videoId !== id || currentView() !== "read") return;
+    if (transcriptRows.length !== state.segments.length) {
+      renderTranscript({ force: true });
+      return;
+    }
+    if (i === 0) decorateCache = null;
+    const started = Date.now();
+    while (i < transcriptRows.length && Date.now() - started < 8) {
+      paintOneTranscriptRow(i);
+      i += 1;
+    }
+    if (i < transcriptRows.length) {
+      if (globalThis.requestIdleCallback) requestIdleCallback(run, { timeout: 400 });
+      else setTimeout(run, 16);
+    }
   };
   if (globalThis.requestIdleCallback) requestIdleCallback(run, { timeout: 1200 });
   else setTimeout(run, 360);
@@ -763,6 +777,7 @@ function pauseFollowFromUser(event) {
 
 async function followTick() {
   if (followBusy || document.hidden) return;
+  if (Date.now() - lastPlayheadAt < 450) return;
   if (!state.videoId || !state.segments.length || !state.tabId) return;
   followBusy = true;
   try {
@@ -776,8 +791,11 @@ function applyPlayhead(info) {
   if (Date.now() < selectingUntil) return;
   if (info?.ad) return;
   if (!Number.isFinite(info?.currentTime)) return;
-  if (info.videoId && state.videoId && info.videoId !== state.videoId) return;
+  if (state.tabId && info.tabId && Number(info.tabId) !== Number(state.tabId)) return;
+  if (state.videoId && info.videoId !== state.videoId) return;
+  lastPlayheadAt = Date.now();
   state.lastSeconds = info.currentTime;
+  saveCacheSoon(6000);
   paintMarkWalker(info.currentTime);
   const active = paintPlayingRow(info.currentTime);
   if (!followPlayback || !active || !isReadView()) return;
@@ -785,9 +803,13 @@ function applyPlayhead(info) {
     if (isRowNearCenter(active, 80)) followPausedByUser = false;
     else return;
   }
-  if (Date.now() < followLockUntil) return;
   const start = Number(active.dataset.start);
-  if (start === lastFollowedStart && isRowNearCenter(active, 48)) return;
+  if (start === lastFollowedStart && isRowNearCenter(active, 80)) return;
+  if (Date.now() < followLockUntil) {
+    if (start === lastFollowedStart) return;
+    centerRowInView(active, { smooth: false });
+    return;
+  }
   centerRowInView(active, { smooth: false });
 }
 
@@ -956,7 +978,7 @@ let pendingWatchInfo = null;
 
 function markWatchStage(stage, extra = {}) {
   chrome.storage.local
-    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.6", ...extra } })
+    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.7", ...extra } })
     .catch(() => {});
 }
 
@@ -987,6 +1009,9 @@ function takeIncomingWatch(info) {
       (!state.tabId || Number(next.tabId) === Number(state.tabId) || next.source === "user")
     ) {
       state.tabId = next.tabId;
+    }
+    if (state.segments.length && !loadingVideoId && $("mainBox")?.hidden && $("setupGate")?.hidden) {
+      showMain();
     }
     return;
   }
@@ -2146,7 +2171,10 @@ async function checkAchievements({ silent = false } = {}) {
 }
 
 function checkAchievementsSoon(flag) {
-  if (flag) achieveStore.flags[flag] = true;
+  if (flag) {
+    achieveStore.flags[flag] = true;
+    persistAchieve().catch(() => {});
+  }
   clearTimeout(achieveTimer);
   achieveTimer = setTimeout(() => {
     checkAchievements().catch(() => {});
@@ -2209,7 +2237,10 @@ async function hydrateLib() {
     }
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  if (changed) await persistLib();
+  if (changed) {
+    await persistLib();
+    checkAchievementsSoon();
+  }
 }
 
 function goToVideo(videoId, seconds) {
@@ -3520,6 +3551,7 @@ async function loadResumeHint() {
 async function saveCache() {
   if (!state.videoId) return;
   const key = `vb_cache_${state.videoId}`;
+  const savedAt = Date.now();
   const payload = {
     title: state.title,
     gist: state.gist,
@@ -3542,8 +3574,9 @@ async function saveCache() {
     levelScan: state.levelScan || null,
     vocabPreviewDone: Boolean(state.vocabPreviewDone),
     vocabPreviewKey: state.vocabPreviewDone ? `${state.videoId}:${resolveVocabLevel().key}` : "",
-    savedAt: Date.now(),
+    savedAt,
   };
+  state._trackAt = savedAt;
   try {
     const idxStore = await chrome.storage.local.get("vb_cache_index");
     let index = [state.videoId, ...(idxStore.vb_cache_index || []).filter((id) => id !== state.videoId)];
@@ -3557,7 +3590,7 @@ async function saveCache() {
         title: state.title,
         language: state.language,
         segments: state.segments,
-        savedAt: Date.now(),
+        savedAt,
       },
     });
     if (evicted.length) await chrome.storage.local.remove(evicted.map((id) => `vb_cache_${id}`));
@@ -3620,8 +3653,10 @@ function showStateBox(emoji, title, sub, retry, showIdea) {
   if ($("stateBy")) $("stateBy").hidden = !showIdea;
   if ($("stateNote")) $("stateNote").hidden = !showIdea;
   if ($("stateVocab")) $("stateVocab").hidden = !showIdea;
-  if ($("stateOpen")) $("stateOpen").hidden = !showIdea;
-  if (showIdea) paintStateTabs();
+  if ($("stateOpen")) {
+    $("stateOpen").hidden = false;
+    paintStateTabs();
+  }
   const due = dueCards().length;
   if ($("stateReview")) $("stateReview").hidden = Boolean(retry) || !due || !showIdea;
 }
@@ -3826,6 +3861,14 @@ function openAuthorCard(focusMsg = false) {
 }
 
 function fillSettingsDrawer() {
+  const keep = {
+    key: $("setKey")?.value,
+    supa: $("setSupadata")?.value,
+    base: $("setBase")?.value,
+    kouling: $("setKoulingUrl")?.value,
+    msg: $("authorMsg")?.value,
+    captionsOnly: $("setCaptionsOnly")?.checked,
+  };
   $("settingsDrawer").innerHTML = `
     <div class="settings-head">
       <h2>${t("设置")}</h2>
@@ -3913,12 +3956,14 @@ function fillSettingsDrawer() {
   `;
   $("settingsClose")?.addEventListener("click", () => closeSettings());
   fillLangPicker($("setUiLang"), currentLang());
-  $("setKey").value = settingsCache.apiKey || "";
-  $("setSupadata").value = settingsCache.supadataKey || "";
-  $("setBase").value = settingsCache.baseUrl || "";
+  $("setKey").value = keep.key != null ? keep.key : settingsCache.apiKey || "";
+  $("setSupadata").value = keep.supa != null ? keep.supa : settingsCache.supadataKey || "";
+  $("setBase").value = keep.base != null ? keep.base : settingsCache.baseUrl || "";
   $("setModel").value = settingsCache.model || "deepseek-v4-flash";
   $("setDiveModel").value = settingsCache.diveModel || "deepseek-v4-pro";
-  if ($("setKoulingUrl")) $("setKoulingUrl").value = settingsCache.koulingUrl || "";
+  if ($("setKoulingUrl")) $("setKoulingUrl").value = keep.kouling != null ? keep.kouling : settingsCache.koulingUrl || "";
+  if ($("authorMsg") && keep.msg != null) $("authorMsg").value = keep.msg;
+  if ($("setCaptionsOnly") && keep.captionsOnly != null) $("setCaptionsOnly").checked = keep.captionsOnly;
   bindVocabBandUI("set");
   const paint = (root, value) => {
     root?.querySelectorAll("[data-m]").forEach((btn) => btn.classList.toggle("active", btn.dataset.m === value));
@@ -4481,7 +4526,7 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
     selectedBlock: -1,
     dives: cached?.dives || {},
     scripts: cached?.scripts || {},
-    translations: { ...(src.translations || {}), ...(cached?.translations || {}) },
+    translations: { ...(cached?.translations || {}), ...(src.translations || {}) },
     transcriptMode: preferredTranscriptMode(),
     chat: cached?.chat || [],
     askContext: null,
@@ -4576,6 +4621,10 @@ function paintOpenedVideo() {
     title: state.title,
     lastSeconds: state.lastSeconds,
   });
+  const needZh =
+    state.transcriptMode !== "original" &&
+    state.segments.some((_, i) => !translationAt(i));
+  if (needZh) isTranslating = true;
   paintView(currentView());
   if (state.tabId) ensureContentScript(state.tabId).catch(() => {});
   if (pendingSeek?.videoId === videoId && Number.isFinite(Number(pendingSeek.seconds))) {
@@ -4586,9 +4635,6 @@ function paintOpenedVideo() {
   if (state.lastSeconds >= 20 && !state.resumeHint?.where && !state.resumeHint?.error && !captionsOnlyMode()) {
     loadResumeHint();
   }
-  const needZh =
-    state.transcriptMode !== "original" &&
-    state.segments.some((_, i) => !translationAt(i));
   if (needZh) translateAll();
   renderTranslateBar();
   applyPlayRate(playbackRate, false);
@@ -4599,15 +4645,34 @@ function paintOpenedVideo() {
 async function loadVideo(videoId, tabTitle = "", opts = {}) {
   const force = Boolean(opts && opts.force);
   if (!force && state.videoId === videoId && state.segments.length) {
-    if ($("mainBox")?.hidden && $("setupGate")?.hidden && !isSettingsOpen()) showMain();
-    flushPendingHotkey();
-    return;
+    try {
+      const [cached, liveStore] = await Promise.all([
+        loadCache(videoId),
+        chrome.storage.local.get("vb_live"),
+      ]);
+      const live = liveStore.vb_live?.videoId === videoId ? liveStore.vb_live : null;
+      const incomingAt = Math.max(Number(live?.savedAt) || 0, Number(cached?.savedAt) || 0);
+      if (!incomingAt || incomingAt <= (Number(state._trackAt) || 0)) {
+        if ($("mainBox")?.hidden && $("setupGate")?.hidden && !isSettingsOpen()) showMain();
+        flushPendingHotkey();
+        return;
+      }
+    } catch (_e) {
+      if ($("mainBox")?.hidden && $("setupGate")?.hidden && !isSettingsOpen()) showMain();
+      flushPendingHotkey();
+      return;
+    }
   }
   if (!force && loadingVideoId === videoId) return;
   videoJob += 1;
   const job = videoJob;
   loadingVideoId = videoId;
+  isTranslating = false;
+  if (typeof translateAll === "function") translateAll.busy = false;
   clearQueuedWork();
+  if (state.videoId !== videoId || !state.segments.length) {
+    showStateBox("K", t("正在打开字幕…"), t("铺好之后就可以划线、拆知识。"), false, true);
+  }
 
   try {
     const [cached, liveStore] = await Promise.all([
@@ -4615,7 +4680,18 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
       chrome.storage.local.get("vb_live"),
     ]);
     const live = liveStore.vb_live?.videoId === videoId ? liveStore.vb_live : null;
-    const segs = live?.segments?.length ? live.segments : cached?.segments;
+    const liveSegs = live?.segments;
+    const cacheSegs = cached?.segments;
+    const liveAt = Number(live?.savedAt) || 0;
+    const cacheAt = Number(cached?.savedAt) || 0;
+    const segs = (() => {
+      const a = liveSegs?.length ? liveSegs : null;
+      const b = cacheSegs?.length ? cacheSegs : null;
+      if (!a) return b;
+      if (!b) return a;
+      if (liveAt && cacheAt && liveAt !== cacheAt) return liveAt > cacheAt ? a : b;
+      return a.length >= b.length ? a : b;
+    })();
     if (segs?.length) {
       hydrateVideoState(
         videoId,
@@ -4623,6 +4699,7 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
         { title: live?.title || cached?.title || tabTitle, language: live?.language || cached?.language || "", segments: segs },
         cached,
       );
+      state._trackAt = Math.max(liveAt, cacheAt);
       transcriptFailId = "";
       transcriptFailAt = 0;
       paintOpenedVideo();
@@ -4630,9 +4707,6 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
       return;
     }
 
-    if (!state.segments.length) {
-      showStateBox("K", t("正在打开字幕…"), t("铺好之后就可以划线、拆知识。"));
-    }
     markWatchStage("captions", { videoId, tabId: state.tabId });
     const result = await Promise.race([
       sendToBg({ action: "vbSupadata", videoId }),
@@ -4643,12 +4717,13 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
       transcriptFailId = videoId;
       transcriptFailAt = Date.now();
       markWatchStage("caption-error", { videoId, error: String(result?.error || "").slice(0, 240) });
-      showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(result?.error), true);
+      showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(result?.error), true, true);
       return;
     }
     transcriptFailId = "";
     transcriptFailAt = 0;
     hydrateVideoState(videoId, tabTitle, result, cached);
+    state._trackAt = Date.now();
     paintOpenedVideo();
     markWatchStage("opened", { videoId, tabId: state.tabId });
     saveCache();
@@ -4657,7 +4732,7 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     transcriptFailId = videoId;
     transcriptFailAt = Date.now();
     markWatchStage("caption-error", { videoId, error: String(error?.message || error).slice(0, 240) });
-    showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(error?.message || error), true);
+    showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(error?.message || error), true, true);
   } finally {
     if (job === videoJob && loadingVideoId === videoId) loadingVideoId = null;
   }
@@ -5042,7 +5117,8 @@ function paintMarkWalker(seconds) {
   }
   const near = nearestMark(seconds, MARK_NEAR);
   const nid = near?.id || "";
-  if (nid !== markNearId) markNearId = nid;
+  if (nid === markNearId) return;
+  markNearId = nid;
   $("markPins")?.querySelectorAll(".mark-pin").forEach((el) => {
     el.classList.toggle("near", el.dataset.id === nid);
   });
@@ -5064,7 +5140,7 @@ function paintMarkPins() {
       .map((m) => {
         const pct = Math.max(0, Math.min(100, (Number(m.seconds) / dur) * 100));
         const tip = m.note ? `${m.label}\n${m.note}` : m.label;
-        return `<button type="button" class="mark-pin${m.note ? " has-note" : ""}" data-id="${escAttr(m.id)}" style="left:${pct}%" title="${escAttr(tip)}">${face}</button>`;
+        return `<button type="button" class="mark-pin${m.note ? " has-note" : ""}${m.id === markNearId ? " near" : ""}" data-id="${escAttr(m.id)}" style="left:${pct}%" title="${escAttr(tip)}">${face}</button>`;
       })
       .join("");
 }
@@ -7241,6 +7317,15 @@ function updateLoopBtn() {
   renderLoopBanner();
 }
 
+function refreshLoopChrome() {
+  updateLoopBtn();
+  paintLoopRows();
+  if (currentView() === "bricks") {
+    renderBrickBar();
+    renderBrickList();
+  }
+}
+
 function updateShadowBtn() {
   const btn = $("shadowBtn");
   if (!btn) return;
@@ -7293,9 +7378,7 @@ function renderLoopBanner() {
   $("loopStopBtn")?.addEventListener("click", () => {
     const wasShadow = state.shadowing;
     clearAllLoops();
-    paintLoopRows();
-    renderBrickBar();
-    renderBrickList();
+    refreshLoopChrome();
     flashHint(wasShadow ? t("已停跟读") : t("已停循环"));
   });
   $("loopRate")?.querySelectorAll("[data-rate]").forEach((btn) => {
@@ -7379,11 +7462,15 @@ async function startSpanLoop(span, opts = {}) {
   if (state.shadowing) {
     state.shadowGapSec = state.shadowGap ? shadowGapSeconds(span) : 0;
   }
+  updateLoopBtn();
+  paintLoopRows();
   const res = await sendToTabSure(loopMessage(span, true));
   if (!res) {
     state.loopSpan = null;
     state.lineLoop = -1;
     state.shadowing = false;
+    updateLoopBtn();
+    paintLoopRows();
     return false;
   }
   scrollToSeconds(span.start);
@@ -7406,10 +7493,7 @@ async function toggleLineLoop(idx) {
       to: idx,
     });
   }
-  updateLoopBtn();
-  paintLoopRows();
-  renderBrickBar();
-  renderBrickList();
+  refreshLoopChrome();
 }
 
 async function toggleReaderLoop(fallbackIdx) {
@@ -7418,18 +7502,12 @@ async function toggleReaderLoop(fallbackIdx) {
     if (sameLoopSpan(state.loopSpan, span) && !state.shadowing) clearAllLoops();
     else await startSpanLoop(span);
     window.getSelection()?.removeAllRanges();
-    updateLoopBtn();
-    paintLoopRows();
-    renderBrickBar();
-    renderBrickList();
+    refreshLoopChrome();
     return;
   }
   if (isLooping()) {
     clearAllLoops();
-    updateLoopBtn();
-    paintLoopRows();
-    renderBrickBar();
-    renderBrickList();
+    refreshLoopChrome();
     return;
   }
   await toggleLineLoop(fallbackIdx);
@@ -7481,9 +7559,7 @@ async function toggleShadowRead(fallbackIdx) {
   const liveSel = selectionLoopRange();
   if (state.shadowing && !liveSel) {
     clearAllLoops();
-    paintLoopRows();
-    renderBrickBar();
-    renderBrickList();
+    refreshLoopChrome();
     flashHint(t("已停跟读"));
     return;
   }
@@ -7494,9 +7570,7 @@ async function toggleShadowRead(fallbackIdx) {
   }
   if (state.shadowing && sameLoopSpan(state.loopSpan, span)) {
     clearAllLoops();
-    paintLoopRows();
-    renderBrickBar();
-    renderBrickList();
+    refreshLoopChrome();
     flashHint(t("已停跟读"));
     return;
   }
@@ -7504,10 +7578,7 @@ async function toggleShadowRead(fallbackIdx) {
   const ok = await startSpanLoop(span, { shadow: true });
   window.getSelection()?.removeAllRanges();
   selPayload = null;
-  updateLoopBtn();
-  paintLoopRows();
-  renderBrickBar();
-  renderBrickList();
+  refreshLoopChrome();
   if (!ok) {
     applyPlayRate(watchRate, false);
     flashHint(t("视频页没接上。点一下视频再试。"));
@@ -8532,12 +8603,8 @@ function zhSlotHtml(i, zh = translationAt(i)) {
   if (state.translateFailed?.[i]) {
     return `<div class="t-zh failed">${t("这句没翻出来")} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
   }
-  if (isTranslating) {
+  if (state.transcriptMode !== "original") {
     return `<div class="t-zh pending"><span class="zh-skel" aria-hidden="true"></span></div>`;
-  }
-  if (state.transcriptMode === "zh") {
-    const src = state.segments[i]?.text || "";
-    return `<div class="t-zh skipped">${decorateText(src)} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
   }
   return "";
 }
@@ -8706,7 +8773,8 @@ function renderTranscript(opts = {}) {
 }
 
 async function translateAll() {
-  if (isTranslating) return;
+  if (translateAll.busy) return;
+  translateAll.busy = true;
   isTranslating = true;
   if (!state.translateFailed) state.translateFailed = {};
   const videoId = state.videoId;
@@ -8743,16 +8811,15 @@ async function translateAll() {
           delete state.translateFailed[i];
         } else {
           delete state.translations[i];
-          if (kind === "error") state.translateFailed[i] = true;
-          else delete state.translateFailed[i];
+          state.translateFailed[i] = true;
         }
         patchRowTranslation(i);
       });
       renderTranslateBar();
       backfillHandQuoteZh();
-      saveCacheSoon(1200);
     }
   } finally {
+    translateAll.busy = false;
     isTranslating = false;
     if (job === videoJob && state.videoId === videoId) {
       renderTranslateBar();
@@ -8765,6 +8832,7 @@ function setTranscriptMode(mode) {
   const next = mode === "zh" || mode === "original" ? mode : "bilingual";
   state.transcriptMode = next;
   void saveSettings({ transcriptMode: next });
+  if (next !== "original") isTranslating = true;
   renderTranscript({ force: true });
   if (next !== "original") translateAll();
 }
@@ -8941,7 +9009,6 @@ function paintSelBarChrome() {
 function paintOneTranscriptRow(i) {
   const old = transcriptRows[i];
   if (!old || !state.segments[i]) return;
-  decorateCache = null;
   const fresh = buildTranscriptRow(i, {
     mode: state.transcriptMode,
     echoes: echoMarksForSegments(),
@@ -11105,9 +11172,7 @@ async function applyHotkey(payload) {
     if (!isLooping()) return;
     const wasShadow = state.shadowing;
     clearAllLoops();
-    paintLoopRows();
-    renderBrickBar();
-    renderBrickList();
+    refreshLoopChrome();
     flashHint(wasShadow ? t("已停跟读") : t("已停循环"));
     return;
   }
@@ -12037,12 +12102,20 @@ async function askVideo(question) {
 // ---------- poll ----------
 
 async function pollTick() {
-  if (pollBusy || !keysReady()) return;
+  if (!keysReady()) return;
+  if (pollBusy) {
+    pollTick._again = true;
+    return;
+  }
   pollBusy = true;
   try {
     await pollTickWork();
   } finally {
     pollBusy = false;
+    if (pollTick._again) {
+      pollTick._again = false;
+      pollTick();
+    }
   }
 }
 
@@ -12251,7 +12324,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (area === "local" && changes.vb_settings?.newValue) {
       const incoming = changes.vb_settings.newValue;
       settingsCache = { ...settingsCache, ...incoming };
-      if ($("setLiveCc") && typeof incoming.liveCc === "boolean") {
+      if ($("setLiveCc") && typeof incoming.liveCc === "boolean" && document.activeElement !== $("setLiveCc")) {
         $("setLiveCc").checked = incoming.liveCc;
       }
       paintLiveStyleSettings();
@@ -12352,9 +12425,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!typing && isLooping()) {
         event.preventDefault();
         clearAllLoops();
-        paintLoopRows();
-        renderBrickBar();
-        renderBrickList();
+        refreshLoopChrome();
         flashHint("已停循环");
         return;
       }
@@ -12446,6 +12517,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("themeBtn")?.addEventListener("click", (event) => {
     event.stopPropagation();
     $("moreMenu") && ($("moreMenu").hidden = true);
+    if (isSettingsOpen()) closeSettings();
     setVocabPop(false);
     setAchievePop(false);
     const pop = $("themePop");
@@ -12459,6 +12531,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     menu.hidden = !menu.hidden;
     $("moreBtn").setAttribute("aria-expanded", String(!menu.hidden));
     if (!menu.hidden) {
+      if (isSettingsOpen()) closeSettings();
       setVocabPop(false);
       setAchievePop(false);
       if ($("themePop")) $("themePop").hidden = true;
@@ -12521,7 +12594,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("stateRetry").addEventListener("click", () => {
-    const id = state.videoId || loadingVideoId || transcriptFailId;
+    const id = transcriptFailId || loadingVideoId || state.videoId;
     loadingVideoId = null;
     transcriptFailId = "";
     transcriptFailAt = 0;
@@ -12717,13 +12790,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         clearAllLoops();
         flashHint(t("已停循环"));
       } else {
-        await startSpanLoop(span);
+        const ok = await startSpanLoop(span);
+        if (!ok) {
+          refreshLoopChrome();
+          flashHint(t("视频页没接上。点一下视频再试。"));
+          return;
+        }
         flashHint(t("正在循环这段。再点一次或按 Esc 停。"));
       }
-      updateLoopBtn();
-      paintLoopRows();
-      renderBrickBar();
-      renderBrickList();
+      refreshLoopChrome();
     } else if (act === "note") {
       openNoteModal();
     } else if (act === "define") {
@@ -12838,7 +12913,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
   try {
     chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-      if (state.videoId && state.segments.length && state.tabId && tabId !== state.tabId) return;
       try {
         const tab = await chrome.tabs.get(tabId);
         takeIncomingWatch({
@@ -12846,6 +12920,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           title: tab.title || "",
           tabId,
           url: tabHref(tab),
+          activeWatch: Boolean(tab.active),
           source: "tab",
         });
       } catch (_e) {}
@@ -12853,12 +12928,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
       if (!(info.url || info.status === "complete")) return;
-      if (state.tabId && tabId !== state.tabId) return;
+      const href = tabHref(tab);
+      const activeWatch = Boolean(tab?.active && typeof isWatchHost === "function" && isWatchHost(href));
+      if (state.tabId && tabId !== state.tabId && !activeWatch) return;
       takeIncomingWatch({
-        videoId: videoIdFromHref(tabHref(tab)),
+        videoId: videoIdFromHref(href),
         title: tab?.title || "",
         tabId,
-        url: tabHref(tab),
+        url: href,
+        activeWatch,
         source: "tab",
       });
       wakeWatchPoll();
@@ -12869,7 +12947,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       const port = chrome.runtime.connect({ name: "kaizen-follow" });
       port.onMessage.addListener((msg) => {
         if (msg?.action === "vbTick") {
-          takeIncomingWatch({ ...msg, source: "tick" });
           applyPlayhead(msg);
         }
       });
@@ -12877,10 +12954,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (_e) {}
   };
   bindFollowPort();
-  setInterval(followTick, 280);
-  setInterval(() => {
-    if (state.videoId) saveCache();
-  }, 15000);
+  setInterval(followTick, 480);
   } catch (err) {
     recoverBoot(err);
   }
