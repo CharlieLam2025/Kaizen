@@ -302,14 +302,27 @@ function parseLooseJson(text) {
   throw new Error("AI 这次返回的格式乱了，再试一次。");
 }
 
-function pickAiText(data) {
+function pickAiText(data, { json = false } = {}) {
   const msg = data?.choices?.[0]?.message || {};
   const content = String(msg.content ?? "").trim();
   if (content) return content;
+  if (json) return "";
   return String(msg.reasoning_content || msg.reasoning || "").trim();
 }
 
-async function callAi({ system, messages, json = false, maxTokens = 4096, model, temperature, think = false, _retried = false, _plain = false }) {
+async function callAi({
+  system,
+  messages,
+  json = false,
+  maxTokens = 4096,
+  model,
+  temperature,
+  think = false,
+  _retried = false,
+  _plain = false,
+  _retriedJson = false,
+  _retriedLength = false,
+}) {
   const settings = await getSettings();
   setUiLang(settings.uiLang);
   if (!settings.apiKey) {
@@ -337,6 +350,22 @@ async function callAi({ system, messages, json = false, maxTokens = 4096, model,
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    if (res.status === 429 && !_retried) {
+      await new Promise((ok) => setTimeout(ok, 1400));
+      return callAi({
+        system,
+        messages,
+        json,
+        maxTokens,
+        model,
+        temperature,
+        think,
+        _retried: true,
+        _plain,
+        _retriedJson,
+        _retriedLength,
+      });
+    }
     if (!_plain && res.status === 400) {
       return callAi({
         system,
@@ -348,24 +377,44 @@ async function callAi({ system, messages, json = false, maxTokens = 4096, model,
         think: false,
         _retried: true,
         _plain: true,
+        _retriedJson,
+        _retriedLength,
       });
     }
     throw new Error(`AI 请求失败（${res.status}）${body.slice(0, 200)}`);
   }
   const data = await res.json();
-  const text = pickAiText(data);
+  const text = pickAiText(data, { json });
   if (text) return text;
   const reason = data?.choices?.[0]?.finish_reason || "";
-  if (!_retried && (thinkingOn || reason === "length")) {
+  if (json && !_retriedJson) {
     return callAi({
       system,
       messages,
-      json,
-      maxTokens: Math.max(maxTokens, 4096),
+      json: false,
+      maxTokens: Math.max(maxTokens, 2048),
       model,
       temperature,
       think: false,
-      _retried: true,
+      _retried,
+      _plain,
+      _retriedJson: true,
+      _retriedLength,
+    });
+  }
+  if ((thinkingOn || reason === "length") && !_retriedLength) {
+    return callAi({
+      system,
+      messages,
+      json: false,
+      maxTokens: Math.max(maxTokens * 2, 4096),
+      model,
+      temperature,
+      think: false,
+      _retried,
+      _plain,
+      _retriedJson,
+      _retriedLength: true,
     });
   }
   throw new Error(reason === "length" ? "回答被截断了，再试一次。" : "AI 返回为空");
@@ -753,23 +802,71 @@ function cleanZh(text) {
     .trim();
 }
 
+function polishTranslateLine(zh, line) {
+  const cleaned = cleanZh(zh);
+  if (!cleaned || sameAsSource(cleaned, line)) return "";
+  if (/翻译失败|筛词失败|拆块失败|额度不够|钥匙无效/i.test(cleaned)) return "";
+  if (!/[\u4e00-\u9fff]/.test(cleaned) && /(error|exception|failed|request|api key)/i.test(cleaned)) return "";
+  return cleaned;
+}
+
+async function translateChunk(src, settings) {
+  const chars = src.reduce((n, line) => n + line.length, 0);
+  const maxTokens = Math.min(8192, 800 + chars + src.length * 80);
+  const run = async (json, tokens = maxTokens) => {
+    const text = await callAi({
+      system: translateSystem(settings),
+      json,
+      maxTokens: tokens,
+      temperature: 0.2,
+      messages: [{ role: "user", content: `json\n${JSON.stringify(src)}` }],
+    });
+    return pickTranslateRows(parseLooseJson(text));
+  };
+  let raw = [];
+  try {
+    raw = await run(true);
+  } catch (_e) {
+    raw = await run(false);
+  }
+  let out = src.map((line, i) => polishTranslateLine(raw[i], line));
+  const missing = out.map((zh, i) => (zh ? -1 : i)).filter((i) => i >= 0);
+  if (missing.length === src.length && src.length) {
+    try {
+      raw = await run(false);
+      out = src.map((line, i) => polishTranslateLine(raw[i], line));
+    } catch (_e) {}
+  }
+  const still = out.map((zh, i) => (zh ? -1 : i)).filter((i) => i >= 0);
+  if (still.length && still.length < src.length) {
+    try {
+      const mini = still.map((i) => src[i]);
+      const text = await callAi({
+        system: translateSystem(settings),
+        json: false,
+        maxTokens: Math.min(8192, 600 + mini.reduce((n, line) => n + line.length, 0) + mini.length * 80),
+        temperature: 0.2,
+        messages: [{ role: "user", content: `json\n${JSON.stringify(mini)}` }],
+      });
+      const extra = pickTranslateRows(parseLooseJson(text));
+      still.forEach((i, k) => {
+        const zh = polishTranslateLine(extra[k], src[i]);
+        if (zh) out[i] = zh;
+      });
+    } catch (_e) {}
+  }
+  return out;
+}
+
 async function handleTranslate({ lines }) {
   const settings = await getSettings();
   const src = (Array.isArray(lines) ? lines : []).slice(0, 40).map((line) => String(line).slice(0, 500));
-  const text = await callAi({
-    system: translateSystem(settings),
-    json: true,
-    messages: [{ role: "user", content: JSON.stringify(src) }],
-  });
-  const parsed = parseLooseJson(text);
-  const raw = Array.isArray(parsed.t) ? parsed.t : [];
-  const out = src.map((line, i) => {
-    const zh = cleanZh(raw[i] || "");
-    if (!zh || sameAsSource(zh, line)) return "";
-    if (/翻译失败|筛词失败|拆块失败|额度不够|钥匙无效/i.test(zh)) return "";
-    if (!/[\u4e00-\u9fff]/.test(zh) && /(error|exception|failed|request|api key)/i.test(zh)) return "";
-    return zh;
-  });
+  if (!src.length) return { translations: [] };
+  const size = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 10;
+  const out = [];
+  for (let i = 0; i < src.length; i += size) {
+    out.push(...(await translateChunk(src.slice(i, i + size), settings)));
+  }
   return { translations: out };
 }
 

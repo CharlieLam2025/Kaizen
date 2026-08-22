@@ -23,6 +23,8 @@ const {
   formatClock,
   parseClockInput,
   sameAsSource,
+  pickTranslateRows,
+  TRANSLATE_BATCH,
   alignCaptionTranslations,
   captionTlang,
 } = ctx;
@@ -109,6 +111,11 @@ assert.equal(parseClockInput("1:30:00"), 5400);
 assert.equal(parseClockInput("1:30"), 90);
 assert.equal(sameAsSource("Hello, world!", "hello world"), true);
 assert.equal(sameAsSource("你好世界", "Hello world"), false);
+assert.equal(pickTranslateRows({ t: ["你好", "世界"] }).join("|"), "你好|世界");
+assert.equal(pickTranslateRows({ translations: ["甲", "乙"] }).join("|"), "甲|乙");
+assert.equal(pickTranslateRows(["一", "二"]).join("|"), "一|二");
+assert.equal(pickTranslateRows({ 1: "后", 0: "先" }).join("|"), "先|后");
+assert.equal(pickTranslateRows({ gist: "x" }).length, 0);
 assert.equal(captionTlang("zh-CN"), "zh-Hans");
 assert.equal(captionTlang("zh-TW"), "zh-Hant");
 {
@@ -204,7 +211,7 @@ assert.match(markFaceUrl("cat"), /mark-cat-golden/);
 assert.match(markFaceUrl("dog"), /mark-dog-samoyed/);
 assert.equal(markFaceUrl("ribbon"), "");
 assert.match(content, /document\.body\.appendChild\(next\)/, "K 条要挂在页面上，不能埋进播放器图层");
-assert.match(content, /VB_CONTENT_REV = 29/, "重载后要升 rev，才能重装 K");
+assert.match(content, /VB_CONTENT_REV = 30/, "重载后要升 rev，才能重装 K");
 assert.doesNotMatch(content, /data-mode="original"/, "字幕语言不要堆在片子上反复点");
 assert.match(content, /liveModeOf\(stored\.vb_settings\?\.transcriptMode\)/, "片上字幕要跟侧栏记住的双语");
 assert.match(content, /function bindLivePointerGuard/, "片子上要点得着，先在页面上拦住播放器");
@@ -242,6 +249,15 @@ assert.match(content, /liveSegFinger\(a\) === liveSegFinger\(b\)/, "只写译文
 assert.match(content, /wasFs === nowFs/, "B 站 class 抖一下不能重放条子");
 assert.match(content, /bpx-state-web-fullscreen/, "B 站网页全屏要跟进条子");
 assert.match(panel, /translateAll\.busy/, "快切视频时漏翻的翻译要能再进");
+assert.equal(TRANSLATE_BATCH, 10, "侧栏和后台要同一批大小");
+assert.match(panel, /pending.length < batch/, "DeepSeek 一次不要塞 40 句");
+assert.match(panel, /translateTries/, "空译文要再试一次，不能立刻钉死");
+assert.match(bg, /function translateChunk/, "多句要按块翻，不能只切前 12 条把后面钉死");
+assert.match(bg, /missing.length === src.length/, "整块都空要再翻一次");
+assert.match(bg, /_retriedJson/, "JSON 空了和截断要分开重试");
+assert.match(bg, /pickAiText\(data, \{ json \}\)/, "JSON 任务不能把思维链当译文解析");
+assert.match(bg, /res.status === 429 && !_retried/, "429 要歇一下再问");
+assert.match(content, /liveZhTries/, "片子上译文空了也要再试一次");
 assert.match(panel, /kind === "ok"/, "空译文或回声不能当成功");
 assert.match(panel, /state\.translateFailed\[i\] = true/, "翻失败要标出来，不能一直转骨架");
 assert.match(panel, /function refreshLoopChrome/, "阅读页循环不能整表重绘知识块");
