@@ -6,7 +6,7 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 22;
+const VB_CONTENT_REV = 29;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
@@ -1015,6 +1015,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   let liveZhAsked = new Set();
   let liveZhFail = new Set();
   let livePtrHoldT = 0;
+  let liveDragging = false;
+  let liveMarkLine = null;
   let liveActAt = 0;
   let liveActKind = "";
   let livePaneFade = 0;
@@ -1661,7 +1663,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   function liveMountHost() {
-    return document.fullscreenElement || document.webkitFullscreenElement || document.body || document.documentElement;
+    const fs = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fs) return fs;
+    const biliFs = document.querySelector(
+      ".bpx-player-container.bpx-state-web-fullscreen, .bpx-player-container.bpx-state-fullscreen",
+    );
+    if (biliFs) return biliFs;
+    return document.body || document.documentElement;
   }
 
   function mountLiveBar(bar) {
@@ -1682,7 +1690,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   function liveBarBusy(bar) {
-    return Date.now() < livePtrHoldT || Boolean(bar?.matches(":active"));
+    return liveDragging || Date.now() < livePtrHoldT || Boolean(bar?.matches(":active"));
   }
 
   function sayLiveWord(word = liveWord) {
@@ -1730,32 +1738,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   function bindLivePointerGuard() {
-    const types = ["pointerdown", "mousedown", "mouseup", "click", "dblclick"];
+    const types = ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "dblclick"];
     const prev = globalThis.__kzLiveGuard;
     if (typeof prev === "function") {
       for (const type of types) document.removeEventListener(type, prev, true);
     }
+    const endLivePtr = (event) => {
+      liveDragging = false;
+      livePtrHoldT = Date.now() + 180;
+      event.stopImmediatePropagation();
+      if (event.target.closest(".kz-live-top button, #kz-lex")) return;
+      if (liveActKind === "sel-mark" && Date.now() - liveActAt < 80) return;
+      const span = event.target.closest("#kz-live") ? liveSelectionText() : "";
+      if (span) {
+        liveActKind = "sel-mark";
+        liveActAt = Date.now();
+        markLiveWord(span);
+      }
+    };
     const on = (event) => {
       if (!liveOverlayRoot(event)) return;
       if (event.type === "pointerdown" || event.type === "mousedown") {
+        liveDragging = true;
         livePtrHoldT = Date.now() + 480;
+        liveMarkLine = liveLineAt(pageVideo()?.currentTime || 0);
         event.stopImmediatePropagation();
         return;
       }
-      if (event.type === "mouseup") {
-        livePtrHoldT = Date.now() + 180;
-        event.stopImmediatePropagation();
-        const span = event.target.closest("#kz-live") ? liveSelectionText() : "";
-        if (span) {
-          liveActKind = "sel-mark";
-          liveActAt = Date.now();
-          markLiveWord(span);
-        }
+      if (event.type === "pointerup" || event.type === "mouseup") {
+        endLivePtr(event);
         return;
       }
       event.stopImmediatePropagation();
       if (event.type === "dblclick") return;
       if (event.type === "click") event.preventDefault();
+      if (event.target.closest("#kz-lex")) {
+        handleLiveOverlayClick(event);
+        return;
+      }
       if (liveActKind === "sel-mark" && Date.now() - liveActAt < 320) return;
       handleLiveOverlayClick(event);
     };
@@ -1940,15 +1960,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const card = ensureLexCard();
     const line = liveLineAt(pageVideo()?.currentTime || 0);
     const cached = liveDefCache.get(word.toLowerCase());
+    const bodyHtml = cached ? compactDefHtml(cached) : `<div class="kz-lex-wait">${escLive(t("正在查词典…"))}</div>`;
     card.hidden = false;
-    card.dataset.word = word;
-    card.innerHTML = `
+    const wordEl = card.querySelector(".kz-lex-word");
+    if (wordEl && card.querySelector(".kz-lex-body")) {
+      card.dataset.word = word;
+      wordEl.textContent = word;
+      fillLexBody(card, bodyHtml);
+    } else {
+      card.dataset.word = word;
+      card.innerHTML = `
       <div class="kz-lex-top">
         <button type="button" class="kz-lex-word" data-act="say">${escLive(word)}</button>
         <div class="kz-lex-acts"></div>
       </div>
-      <div class="kz-lex-body">${cached ? compactDefHtml(cached) : `<div class="kz-lex-wait">${escLive(t("正在查词典…"))}</div>`}</div>
+      <div class="kz-lex-body">${bodyHtml}</div>
     `;
+    }
     paintLexActions(card);
     placeLexCard();
     if (cached) return;
@@ -2047,15 +2075,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const id = videoIdFromUrl(location.href);
     if (!id || !Object.keys(liveTranslations).length) return;
     chrome.storage.local.get(`vb_cache_${id}`, (stored) => {
-      const pack = stored[`vb_cache_${id}`] || {};
+      const pack = stored[`vb_cache_${id}`];
+      if (!pack) return;
       chrome.storage.local.set({
         [`vb_cache_${id}`]: {
           ...pack,
-          videoId: id,
-          title: pack.title || currentVideoInfo().title || "",
-          segments: pack.segments?.length ? pack.segments : liveSegments,
           translations: { ...(pack.translations || {}), ...liveTranslations },
-          savedAt: Date.now(),
         },
       });
     });
@@ -2101,8 +2126,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       if (wrote) persistLiveTranslations();
     } catch (_e) {
+      want.forEach((i) => liveZhFail.add(i));
+    } finally {
       want.forEach((i) => liveZhAsked.delete(i));
     }
+  }
+
+  function liveStill(id) {
+    return Boolean(id) && videoIdFromUrl(location.href) === id;
   }
 
   async function fillLiveZh() {
@@ -2114,19 +2145,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       if (id && liveFetchedAt !== id && !enoughLiveZh()) {
         const data = await getTranscript(id);
+        if (!liveStill(id)) return;
         liveFetchedAt = id;
         if (data?.translations && Object.keys(data.translations).length) {
           liveTranslations = { ...data.translations, ...liveTranslations };
           persistLiveTranslations();
         }
       }
+      if (!liveStill(id)) return;
       if (Number.isInteger(idx) && !liveZhAt(idx)) await translateLiveAround(idx);
     } catch (_e) {
+      if (!liveStill(id)) return;
       if (Number.isInteger(idx) && !liveZhAt(idx)) await translateLiveAround(idx);
     } finally {
       liveZhBusy = false;
+      if (!liveStill(id)) return;
       livePaintKey = "";
-      liveContentKey = "";
       paintLiveBar();
     }
   }
@@ -2142,6 +2176,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
   }
 
+  function fillLiveEn(en, text, words, emptyHtml = "") {
+    if (words) {
+      en.innerHTML = text ? liveWordsHtml(text) : emptyHtml;
+      return;
+    }
+    if (text) en.textContent = text;
+    else if (emptyHtml) en.innerHTML = emptyHtml;
+  }
+
   function fillLivePane(pane, line, { words = true } = {}) {
     const en = pane.querySelector(".kz-live-en");
     const zh = pane.querySelector(".kz-live-zh");
@@ -2150,25 +2193,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (line.zh) {
         en.hidden = false;
         en.style.opacity = "0.62";
-        if (words) en.innerHTML = line.text ? liveWordsHtml(line.text) : "";
+        fillLiveEn(en, line.text, words, "");
         zh.textContent = line.zh;
         zh.hidden = false;
       } else if (line.text) {
         en.hidden = false;
         en.style.opacity = "";
-        if (words) en.innerHTML = liveWordsHtml(line.text);
+        fillLiveEn(en, line.text, words, "");
         zh.hidden = true;
       } else {
         en.hidden = false;
         en.style.opacity = "";
-        if (words) en.innerHTML = hint;
+        fillLiveEn(en, "", words, hint);
         zh.hidden = true;
       }
       return;
     }
     en.hidden = false;
     en.style.opacity = "";
-    if (words) en.innerHTML = line.text ? liveWordsHtml(line.text) : hint;
+    fillLiveEn(en, line.text, words, hint);
     if (liveMode === "original") {
       zh.textContent = "";
       zh.hidden = true;
@@ -2201,12 +2244,51 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     stopLiveTick._t = 0;
   }
 
+  function bindLiveTimeUpdate() {
+    const video = pageVideo();
+    if (!video || video === bindLiveTimeUpdate._v) return;
+    if (bindLiveTimeUpdate._v && bindLiveTimeUpdate._on) {
+      bindLiveTimeUpdate._v.removeEventListener("timeupdate", bindLiveTimeUpdate._on);
+    }
+    bindLiveTimeUpdate._v = video;
+    bindLiveTimeUpdate._on = () => {
+      if (liveCcOn && liveCaptionReady()) paintLiveBar();
+    };
+    video.addEventListener("timeupdate", bindLiveTimeUpdate._on);
+  }
+
+  function watchBiliFullscreen() {
+    const host = document.querySelector(".bpx-player-container");
+    if (!host || host.dataset.kzFs === String(VB_CONTENT_REV)) return;
+    host.dataset.kzFs = String(VB_CONTENT_REV);
+    if (watchBiliFullscreen._mo) watchBiliFullscreen._mo.disconnect();
+    if (host._kzFsMo) try { host._kzFsMo.disconnect(); } catch (_e) {}
+    let last = host.className;
+    watchBiliFullscreen._mo = new MutationObserver(() => {
+      const now = host.className;
+      const wasFs = /bpx-state-(web-)?fullscreen/.test(last);
+      const nowFs = /bpx-state-(web-)?fullscreen/.test(now);
+      last = now;
+      if (wasFs === nowFs) return;
+      liveGeom = "";
+      const bar = document.getElementById("kz-live");
+      if (!bar || !liveCcOn) return;
+      mountLiveBar(bar);
+      placeLiveBar();
+    });
+    watchBiliFullscreen._mo.observe(host, { attributes: true, attributeFilter: ["class"] });
+    host._kzFsMo = watchBiliFullscreen._mo;
+  }
+
   function startLiveTick() {
     if (stopLiveTick._t || liveRaf) return;
     const pulse = () => {
       stopLiveTick._t = 0;
       liveRaf = 0;
       if (!contentLive() || !liveCcOn) return;
+      syncLiveVideo();
+      bindLiveTimeUpdate();
+      watchBiliFullscreen();
       paintLiveBar();
       stopLiveTick._t = setTimeout(pulse, 220);
     };
@@ -2214,7 +2296,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   function liveCaptionReady() {
-    return liveSegments.length > 0 || Boolean(String(pageCaption() || "").trim());
+    return liveSegments.length > 0;
   }
 
   function applyLiveSkin(bar) {
@@ -2239,13 +2321,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       liveGeom = "";
       return;
     }
-    const bar = ensureLiveBar();
-    applyLiveSkin(bar);
-    applyLiveStyle(bar);
-    paintLiveMode(bar);
-    bar.hidden = false;
-    if (!liveBarBusy(bar)) placeLiveBar();
-    else placeLexCard();
+    if (!liveCaptionReady()) {
+      const bar = document.getElementById("kz-live");
+      if (bar) bar.hidden = true;
+      applyLiveSkin(bar);
+      return;
+    }
     const line = liveLineAt(pageVideo()?.currentTime || 0);
     if (liveMode !== "original" && !line.zh) {
       const idx = line.hit?.idx;
@@ -2255,14 +2336,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const wordsKey = `${contentKey}\n${liveVocab.size}\n${[...liveMarks].join(",")}`;
     const zhKey = `${line.zh}\n${liveZhBusy}\n${Number.isInteger(line.hit?.idx) && liveZhFail.has(line.hit.idx)}`;
     const paintKey = `${wordsKey}\n${zhKey}`;
-    if (paintKey === livePaintKey) return;
+    const existing = document.getElementById("kz-live");
+    const geomDirty = !liveGeom;
+    const busy = existing ? liveBarBusy(existing) : false;
+    if (paintKey === livePaintKey && !geomDirty && (busy || liveWordsKey)) return;
+    const bar = ensureLiveBar();
+    applyLiveSkin(bar);
+    applyLiveStyle(bar);
+    paintLiveMode(bar);
+    bar.hidden = false;
+    if (!busy && (geomDirty || !liveWordsKey)) placeLiveBar();
+    if (busy) placeLexCard();
+    if (paintKey === livePaintKey && (busy || liveWordsKey)) return;
     const panes = bar.querySelectorAll(".kz-live-pane");
     if (!panes.length) return;
     const rewriteWords = wordsKey !== liveWordsKey;
-    const busy = liveBarBusy(bar);
-    if (busy && contentKey !== liveContentKey) return;
     if (busy) {
       fillLivePane(panes[liveFront], line, { words: false });
+      liveContentKey = contentKey;
+      liveWordsKey = "";
       livePaintKey = paintKey;
       return;
     }
@@ -2272,17 +2364,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       panes[1]?.classList.remove("on");
       liveFront = 0;
     } else if (contentKey !== liveContentKey) {
+      if (livePaneFade) {
+        clearTimeout(livePaneFade);
+        livePaneFade = 0;
+        panes[liveFront ^ 1]?.classList.remove("on");
+      }
       const next = liveFront ^ 1;
       const prev = panes[liveFront];
       fillLivePane(panes[next], line, { words: true });
       panes[next]?.classList.add("on");
       liveFront = next;
-      if (livePaneFade) clearTimeout(livePaneFade);
       livePaneFade = setTimeout(() => {
         livePaneFade = 0;
         const front = document.getElementById("kz-live")?.querySelectorAll(".kz-live-pane")[liveFront];
         if (prev && prev !== front) prev.classList.remove("on");
-      }, 260);
+      }, 180);
     } else {
       fillLivePane(panes[liveFront], line, { words: rewriteWords });
     }
@@ -2291,35 +2387,67 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     livePaintKey = paintKey;
   }
 
+  function liveSegFinger(segs) {
+    if (!segs?.length) return "";
+    const a = segs[0];
+    const m = segs[Math.floor(segs.length / 2)];
+    const b = segs[segs.length - 1];
+    return `${segs.length}|${a?.start}|${String(a?.text || "").slice(0, 16)}|${m?.start}|${String(m?.text || "").slice(0, 16)}|${b?.start}|${String(b?.text || "").slice(0, 16)}`;
+  }
+
+  function pickLiveSegs(live, pack) {
+    const a = live?.segments?.length ? live.segments : null;
+    const b = pack?.segments?.length ? pack.segments : null;
+    if (!a) return b || [];
+    if (!b) return a;
+    if (liveSegFinger(a) === liveSegFinger(b)) return a;
+    const tLive = Number(live?.savedAt) || 0;
+    const tPack = Number(pack?.savedAt) || 0;
+    if (tLive && tPack && tLive !== tPack) return tLive > tPack ? a : b;
+    return a.length >= b.length ? a : b;
+  }
+
+  function applyLiveSegs(id, segs) {
+    liveSegments = segs || [];
+    liveSegId = id;
+    liveHoldIdx = -1;
+    liveContentKey = "";
+    liveWordsKey = "";
+    livePaintKey = "";
+  }
+
   async function ensureLiveSegments() {
     const id = videoIdFromUrl(location.href);
     if (!id) return [];
     if (liveSegId === id && liveSegments.length) return liveSegments;
+    const gen = (ensureLiveSegments._gen = (ensureLiveSegments._gen || 0) + 1);
     try {
       const cached = await chrome.storage.local.get([`vb_cache_${id}`, "vb_live"]);
+      if (gen !== ensureLiveSegments._gen || !liveStill(id)) return liveSegments;
       const pack = cached[`vb_cache_${id}`];
-      const live = cached.vb_live?.videoId === id ? cached.vb_live.segments : null;
-      const segs = live?.length ? live : pack?.segments;
-      if (pack?.translations) liveTranslations = { ...pack.translations, ...liveTranslations };
+      const live = cached.vb_live?.videoId === id ? cached.vb_live : null;
+      const segs = pickLiveSegs(live, pack);
+      if (liveSegId && liveSegId !== id) liveTranslations = {};
+      if (pack?.translations) liveTranslations = { ...liveTranslations, ...pack.translations };
       if (segs?.length) {
-        liveSegments = segs;
-        liveSegId = id;
+        applyLiveSegs(id, segs);
         if (liveMode !== "original") fillLiveZh();
         return liveSegments;
       }
     } catch (_e) {}
     try {
       const data = await getTranscript(id);
-      liveSegments = data.segments || [];
-      liveSegId = id;
+      if (gen !== ensureLiveSegments._gen || !liveStill(id)) return liveSegments;
+      applyLiveSegs(id, data.segments || []);
       liveFetchedAt = id;
       if (data.translations && Object.keys(data.translations).length) {
         liveTranslations = { ...data.translations, ...liveTranslations };
         persistLiveTranslations();
       }
     } catch (_e) {
-      liveSegments = [];
+      if (!liveSegments.length) liveSegments = [];
     }
+    if (!liveStill(id)) return liveSegments;
     if (liveMode !== "original") fillLiveZh();
     return liveSegments;
   }
@@ -2371,7 +2499,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const next = String(word || "").trim();
     if (next.length < 2) return;
     const card = document.getElementById("kz-lex");
-    if (liveWord.toLowerCase() === next.toLowerCase() && card && !card.hidden) {
+    const failed = Boolean(card?.querySelector(".kz-lex-err"));
+    if (liveWord.toLowerCase() === next.toLowerCase() && card && !card.hidden && !failed) {
       closeLexCard();
       paintLiveWordFlags();
       return;
@@ -2396,7 +2525,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const next = String(raw || liveWord || "").replace(/\s+/g, " ").trim();
     if (next.length < 2) return;
     if (!liveWord) liveWord = (next.match(/\b[A-Za-z][A-Za-z'-]{1,39}\b/) || [next])[0];
-    const line = liveLineAt(pageVideo()?.currentTime || 0);
+    const line = liveMarkLine?.text ? liveMarkLine : liveLineAt(pageVideo()?.currentTime || 0);
     const info = currentVideoInfo();
     const sentence = String(line.text || "").trim() || next;
     if (!info.videoId) {
@@ -2445,6 +2574,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         toast(t("已划上"));
       });
     });
+    liveMarkLine = null;
   }
 
   function setLiveCc(on) {
@@ -2512,12 +2642,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     document.documentElement.dataset.kzCcBound = String(VB_CONTENT_REV);
     stripOldCaptionWraps();
     bindLivePointerGuard();
-    window.addEventListener("resize", () => {
-      if (contentLive() && liveCcOn) {
-        liveGeom = "";
+    const onGeom = () => {
+      if (!contentLive() || !liveCcOn) return;
+      liveGeom = "";
+      if (onGeom._raf) return;
+      onGeom._raf = requestAnimationFrame(() => {
+        onGeom._raf = 0;
         placeLiveBar();
-      }
-    });
+      });
+    };
+    window.addEventListener("resize", onGeom);
+    window.addEventListener("scroll", onGeom, { passive: true, capture: true });
     const onFs = () => {
       if (!contentLive() || !liveCcOn) return;
       liveGeom = "";
@@ -2531,7 +2666,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     document.addEventListener("webkitfullscreenchange", onFs);
   }
 
+  function resetLiveTrack() {
+    liveSegId = "";
+    liveSegments = [];
+    liveTranslations = {};
+    liveFetchedAt = "";
+    liveZhAsked = new Set();
+    liveZhFail = new Set();
+    liveZhBusy = false;
+    liveWord = "";
+    closeLexCard();
+    livePaintKey = "";
+    liveContentKey = "";
+    liveWordsKey = "";
+    liveHoldIdx = -1;
+    liveGeom = "";
+  }
+
+  function syncLiveVideo() {
+    const id = videoIdFromUrl(location.href) || "";
+    if (id === syncLiveVideo._id) return false;
+    const changed = Boolean(syncLiveVideo._id && id && syncLiveVideo._id !== id);
+    syncLiveVideo._id = id;
+    if (!changed) return false;
+    resetLiveTrack();
+    if (liveCcOn) {
+      ensureLiveSegments().then(() => {
+        livePaintKey = "";
+        liveContentKey = "";
+        paintLiveBar();
+      });
+    }
+    return true;
+  }
+
   function announceWatch() {
+    syncLiveVideo();
     const info = currentVideoInfo();
     chrome.runtime.sendMessage({ action: "vbTick", ...info }, () => void chrome.runtime.lastError);
   }
@@ -2566,20 +2736,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     playerMarkKey = "";
     ensureDock();
     loadPlayerMarks();
-    liveSegId = "";
-    liveSegments = [];
-    liveTranslations = {};
-    liveFetchedAt = "";
-    liveZhAsked = new Set();
-    liveZhFail = new Set();
-    liveZhBusy = false;
-    liveWord = "";
-    closeLexCard();
-    livePaintKey = "";
-    liveContentKey = "";
-    liveWordsKey = "";
-    liveHoldIdx = -1;
-    liveGeom = "";
+    resetLiveTrack();
+    syncLiveVideo._id = videoIdFromUrl(location.href) || "";
     loadLiveCcState();
     announceWatch();
   });
@@ -2593,8 +2751,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     const cacheChanged = Boolean(changes.vb_live) || Object.keys(changes).some((key) => key.startsWith("vb_cache_"));
     if (cacheChanged) {
-      liveSegId = "";
-      if (liveCcOn) ensureLiveSegments().then(() => { livePaintKey = ""; liveContentKey = ""; liveHoldIdx = -1; paintLiveBar(); });
+      const id = videoIdFromUrl(location.href);
+      chrome.storage.local.get([id ? `vb_cache_${id}` : "", "vb_live"], (stored) => {
+        const pack = id ? stored[`vb_cache_${id}`] : null;
+        const live = stored.vb_live?.videoId === id ? stored.vb_live : null;
+        const segs = pickLiveSegs(live, pack);
+        if (liveSegId && liveSegId !== id) liveTranslations = {};
+        if (pack?.translations) liveTranslations = { ...liveTranslations, ...pack.translations };
+        const same = liveSegId === id && liveSegFinger(liveSegments) === liveSegFinger(segs);
+        if (!same && segs.length) {
+          applyLiveSegs(id, segs);
+        } else if (!segs.length && liveSegId === id) {
+          resetLiveTrack();
+          if (liveCcOn) ensureLiveSegments().then(() => paintLiveBar());
+        }
+        livePaintKey = "";
+        if (liveCcOn) paintLiveBar();
+      });
     }
     if (
       changes.vb_marks ||

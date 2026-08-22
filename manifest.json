@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Kaizen",
   "short_name": "Kaizen",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "Kaizen — 把 YouTube 和 B 站当书读：双语字幕、划线笔记、生词本，再按知识块拆开。",
   "icons": {
     "16": "icons/icon16.png",
