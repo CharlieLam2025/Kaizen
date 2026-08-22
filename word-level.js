@@ -409,13 +409,67 @@ function candidates(segments, { known } = {}) {
   return [...map.values()].sort((a, b) => b.count - a.count || a.word.localeCompare(b.word)).slice(0, 80);
 }
 
+const PACK_IDS = ["cet4", "cet6", "kaoyan", "ielts", "toefl", "sat", "gre"];
+
+function knownFromFreq(freq, n) {
+  const set = new Set(CORE);
+  const list = Array.isArray(freq) ? freq : [];
+  const cap = Math.max(0, Math.min(Math.round(Number(n) || 0), list.length));
+  for (let i = 0; i < cap; i += 1) {
+    const w = String(list[i] || "").toLowerCase();
+    if (w) set.add(w);
+  }
+  return set;
+}
+
+function scanLocal(segments, { packWords, userKnown, limit = 24 } = {}) {
+  const skip = new Set(CORE);
+  if (packWords instanceof Set) packWords.forEach((w) => skip.add(String(w).toLowerCase()));
+  else for (const w of packWords || []) skip.add(String(w).toLowerCase());
+  for (const w of userKnown || []) skip.add(String(w).toLowerCase());
+  const map = new Map();
+  for (const seg of segments || []) {
+    const text = String(seg.text || "");
+    const re = /\b[A-Za-z][A-Za-z'-]{2,39}\b/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const raw = m[0];
+      const word = raw.toLowerCase();
+      if (skip.has(word)) continue;
+      if (/^[A-Z]{2,5}$/.test(raw)) continue;
+      if (word.includes("'") && word.length <= 4) continue;
+      let row = map.get(word);
+      if (!row) {
+        row = { word, count: 0, cap: 0, sentence: text, seconds: Number(seg.start) || 0 };
+        map.set(word, row);
+      }
+      row.count += 1;
+      if (/^[A-Z]/.test(raw)) row.cap += 1;
+    }
+  }
+  return [...map.values()]
+    .filter((row) => row.cap < row.count)
+    .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word))
+    .slice(0, Math.max(1, Number(limit) || 24))
+    .map((row) => ({
+      word: row.word,
+      why: "",
+      sentence: row.sentence,
+      seconds: row.seconds,
+      local: true,
+    }));
+}
+
 globalThis.WordLevel = {
   BANDS,
   CORE,
+  PACK_IDS,
   parseScore,
   scoreMeta,
   resolve,
   candidates,
+  scanLocal,
+  knownFromFreq,
   pickTest,
   estimateKnown,
 };

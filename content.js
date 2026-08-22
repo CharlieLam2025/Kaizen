@@ -6,11 +6,14 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 8;
+const VB_CONTENT_REV = 22;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
-  if (typeof globalThis.__vbRemountDock === "function") {
+  document.getElementById("kz-live")?.remove();
+  document.getElementById("kz-lex")?.remove();
+  const oldRev = Number(globalThis.__vbContentRev) || 0;
+  if (oldRev >= VB_CONTENT_REV && typeof globalThis.__vbRemountDock === "function") {
     try {
       globalThis.__vbRemountDock();
       return;
@@ -26,7 +29,7 @@ function vbInstallContentScript() {
   const contentGen = globalThis.__vbContentGen;
   const contentLive = () => globalThis.__vbContentGen === contentGen;
   chrome.storage.local.get("vb_settings", (stored) => {
-    setUiLang(stored.vb_settings?.uiLang || detectLang());
+    setUiLang(stored.vb_settings?.uiLang || "zh-CN");
   });
 //
 // Caption fetching is layered because YouTube throttles naive approaches:
@@ -135,10 +138,57 @@ async function playerResponseFromInnerTube(videoId) {
   return await res.json();
 }
 
-/** Prefers an author-uploaded track over auto-generated (asr) captions. */
+/** Prefers English (manual then ASR), then other non-Chinese, then Chinese. */
 function pickCaptionTrack(tracks) {
   if (!Array.isArray(tracks) || !tracks.length) return null;
-  return tracks.find((t) => t.kind !== "asr") || tracks[0];
+  const score = (t) => {
+    const lang = String(t.languageCode || "").toLowerCase();
+    const asr = t.kind === "asr" ? 8 : 0;
+    if (/^en\b/.test(lang)) return asr;
+    if (!isZhCaptionLang(lang)) return 4 + asr;
+    return 16 + asr;
+  };
+  return [...tracks].sort((a, b) => score(a) - score(b))[0];
+}
+
+function pickNativeZhTrack(tracks, source) {
+  if (!Array.isArray(tracks) || !tracks.length) return null;
+  const score = (t) => {
+    if (t === source) return 99;
+    const lang = String(t.languageCode || "").toLowerCase();
+    const asr = t.kind === "asr" ? 8 : 0;
+    if (lang === "zh-hans" || lang === "zh-cn") return asr;
+    if (lang === "zh") return 1 + asr;
+    if (lang.startsWith("zh")) return 2 + asr;
+    return 99;
+  };
+  const hit = [...tracks].sort((a, b) => score(a) - score(b))[0];
+  return hit && score(hit) < 99 ? hit : null;
+}
+
+function withTlang(baseUrl, tlang) {
+  const url = new URL(baseUrl, "https://www.youtube.com");
+  if (tlang) url.searchParams.set("tlang", tlang);
+  return url.toString();
+}
+
+async function fetchYtTranslations(track, tracks, segments) {
+  if (!track?.baseUrl || !segments?.length) return {};
+  const srcLang = String(track.languageCode || "");
+  if (isZhCaptionLang(srcLang)) return {};
+  const urls = [];
+  const native = pickNativeZhTrack(tracks, track);
+  if (native?.baseUrl) urls.push(native.baseUrl);
+  if (track.isTranslatable !== false) urls.push(withTlang(track.baseUrl, captionTlang()));
+  for (const url of urls) {
+    try {
+      const zhSegs = await fetchCaptionSegments(url);
+      const aligned = alignCaptionTranslations(segments, zhSegs);
+      if (Object.keys(aligned).length >= Math.min(3, segments.length)) return aligned;
+      if (Object.keys(aligned).length) return aligned;
+    } catch (_e) {}
+  }
+  return {};
 }
 
 // ---------- caption body: json3 with XML fallback ----------
@@ -303,8 +353,10 @@ async function getTranscript(videoId) {
       const segments = await fetchCaptionSegments(track.baseUrl);
       console.info(`[VideoBricks] 字幕来源：${name}（${track.languageCode}）`);
       const details = player.videoDetails || {};
+      const translations = await fetchYtTranslations(track, tracks, segments);
       return {
         segments,
+        translations,
         language: track.languageCode || "",
         trackKind: track.kind || "manual",
         title: details.title || "",
@@ -348,11 +400,11 @@ function isYouTubeAd() {
 }
 
 function bindPlayhead(video) {
-  if (!video || video.__vbHeadBound) return video;
-  video.__vbHeadBound = true;
+  if (!video) return video;
   let last = -1;
   let lastAt = 0;
   const send = () => {
+    if (!contentLive()) return;
     const info = currentVideoInfo();
     if (info.ad) return;
     if (!info.videoId && !Number.isFinite(info.currentTime)) return;
@@ -362,9 +414,13 @@ function bindPlayhead(video) {
     chrome.runtime.sendMessage({ action: "vbTick", ...info }, () => void chrome.runtime.lastError);
     if (typeof paintPlayerMarks === "function") paintPlayerMarks();
   };
-  video.addEventListener("timeupdate", send);
-  video.addEventListener("seeked", send);
-  video.addEventListener("ratechange", send);
+  globalThis.__vbHeadSend = send;
+  if (video.__vbHeadBound) return video;
+  video.__vbHeadBound = true;
+  const relay = () => globalThis.__vbHeadSend?.();
+  video.addEventListener("timeupdate", relay);
+  video.addEventListener("seeked", relay);
+  video.addEventListener("ratechange", relay);
   return video;
 }
 
@@ -469,7 +525,16 @@ function currentVideoInfo() {
     looping: Boolean(loopRange),
     rate: video ? video.playbackRate : 1,
     ad,
+    unavailable: pageUnavailable(),
   };
+}
+
+function pageUnavailable() {
+  const title = String(document.title || "");
+  if (/video unavailable|此视频无法播放|视频无法播放|private video|此视频不可用/i.test(title)) return true;
+  const err = document.querySelector(".ytp-error-content-wrap-reason, .ytp-error, yt-player-error-message-renderer");
+  const text = String(err?.textContent || "");
+  return /unavailable|无法播放|不可用|copyright/i.test(text);
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -589,11 +654,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   function injectDockStyle() {
     let style = document.getElementById("kz-dock-css");
+    if (style?.dataset.rev === String(VB_CONTENT_REV)) return;
     if (!style) {
       style = document.createElement("style");
       style.id = "kz-dock-css";
       document.documentElement.appendChild(style);
     }
+    style.dataset.rev = String(VB_CONTENT_REV);
     style.textContent = `
       #kz-dock {
         position: absolute;
@@ -635,6 +702,201 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         box-shadow: 0 0 0 2px rgba(243,234,216,0.5);
       }
       #kz-dock button[data-act="open"] { letter-spacing: -0.04em; }
+      html.kz-live-on .ytp-caption-window-container,
+      html.kz-live-on .caption-window,
+      html.kz-live-on .bpx-player-subtitle-panel,
+      html.kz-live-on .bpx-player-subtitle-area,
+      html.kz-live-on .bpx-player-subtitle-panel-text {
+        opacity: 0 !important;
+        transition: opacity 0.28s ease;
+        pointer-events: none !important;
+      }
+      #kz-live {
+        position: fixed;
+        z-index: 2147483646;
+        box-sizing: border-box;
+        max-width: min(760px, calc(100vw - 24px));
+        padding: 7px 16px 8px;
+        border-radius: 10px;
+        background: rgba(8, 8, 8, 0.52);
+        color: #fff;
+        font-size: var(--kz-live-size, 16px);
+        font-family: var(--kz-live-font, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
+        line-height: 1.45;
+        text-align: center;
+        letter-spacing: 0.01em;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+        box-shadow: none;
+        pointer-events: auto;
+        isolation: isolate;
+        touch-action: manipulation;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-font-smoothing: antialiased;
+        transition: opacity 0.2s ease;
+      }
+      #kz-live .kz-live-en {
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      #kz-live[data-host="player"] { position: absolute; }
+      #kz-lex[data-host="player"] { position: absolute; }
+      #kz-live[hidden] { display: none !important; }
+      #kz-live .kz-live-top {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        margin: 0 0 6px;
+        font-size: 12px;
+        color: #cfc4b0;
+        text-shadow: none;
+      }
+      #kz-live .kz-sw {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #kz-live .kz-sw input {
+        appearance: none;
+        -webkit-appearance: none;
+        display: inline-block;
+        width: 28px;
+        height: 16px;
+        margin: 0;
+        border: 0;
+        border-radius: 999px;
+        background: #5a5348;
+        position: relative;
+        cursor: pointer;
+      }
+      #kz-live .kz-sw input::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #f3ead8;
+        transition: transform 0.15s ease;
+      }
+      #kz-live .kz-sw input:checked { background: #c4472d; }
+      #kz-live .kz-sw input:checked::after { transform: translateX(12px); }
+      #kz-live .kz-live-top button {
+        border: 0;
+        background: rgba(243,234,216,0.12);
+        color: #f3ead8;
+        border-radius: 999px;
+        padding: 5px 11px;
+        min-height: 26px;
+        font: 12px/1.2 sans-serif;
+        cursor: pointer;
+        transition: background 0.15s ease, transform 0.12s ease;
+      }
+      #kz-live .kz-live-top button:hover { background: rgba(243,234,216,0.22); }
+      #kz-live .kz-live-top button:active { transform: scale(0.97); }
+      #kz-live .kz-live-stage {
+        display: grid;
+      }
+      #kz-live .kz-live-pane {
+        grid-area: 1 / 1;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.28s ease;
+      }
+      #kz-live .kz-live-pane.on {
+        opacity: 1;
+        z-index: 1;
+        pointer-events: auto;
+      }
+      #kz-live .kz-live-en { font-weight: 500; }
+      #kz-live .kz-live-zh {
+        margin-top: 3px;
+        color: rgba(255,255,255,0.82);
+        font-size: calc(var(--kz-live-size, 16px) * 0.82);
+        font-weight: 400;
+      }
+      #kz-live .kz-cc-w {
+        display: inline-block;
+        margin: 0 -1px;
+        padding: 1px 4px;
+        border: 0;
+        background: none;
+        color: inherit;
+        font: inherit;
+        line-height: 1.35;
+        cursor: pointer;
+        border-radius: 4px;
+        border-bottom: 1px dotted rgba(243,234,216,0.55);
+        user-select: text;
+        -webkit-user-select: text;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }
+      #kz-live .kz-cc-w:hover { background: rgba(243,234,216,0.16); }
+      #kz-live .kz-cc-w.kz-cc-hit,
+      #kz-live .kz-cc-w.on {
+        background: rgba(196, 71, 45, 0.45);
+        border-bottom-color: transparent;
+      }
+      #kz-live .kz-cc-w.kz-cc-mark {
+        border-bottom: 2px solid #f0c36a;
+      }
+      #kz-lex {
+        position: fixed;
+        z-index: 2147483647;
+        box-sizing: border-box;
+        width: min(360px, calc(100vw - 24px));
+        padding: 10px 12px 12px;
+        border-radius: 12px;
+        background: rgba(20, 17, 12, 0.94);
+        color: #f3ead8;
+        font: 13.5px/1.45 sans-serif;
+        box-shadow: 0 10px 28px rgba(0,0,0,0.4);
+        pointer-events: auto;
+      }
+      #kz-lex[hidden] { display: none !important; }
+      #kz-lex .kz-lex-top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      #kz-lex .kz-lex-word {
+        margin: 0;
+        border: 0;
+        background: none;
+        color: inherit;
+        font: 700 18px/1.2 sans-serif;
+        cursor: pointer;
+        padding: 0;
+      }
+      #kz-lex .kz-lex-acts {
+        display: flex;
+        gap: 6px;
+        margin-left: auto;
+      }
+      #kz-lex .kz-lex-acts button,
+      #kz-lex .kz-lex-more,
+      #kz-lex .kz-lex-err button {
+        border: 0;
+        background: rgba(243,234,216,0.12);
+        color: #f3ead8;
+        border-radius: 999px;
+        padding: 5px 11px;
+        min-height: 26px;
+        font: 12px/1.2 sans-serif;
+        cursor: pointer;
+      }
+      #kz-lex .kz-lex-err button { margin-left: 8px; }
+      #kz-lex .kz-lex-ph { margin-top: 4px; color: #cfc4b0; font-size: 12px; }
+      #kz-lex .kz-lex-zh { margin-top: 6px; font-size: 14px; }
+      #kz-lex .kz-lex-en { margin-top: 3px; color: #d8cbb6; font-size: 12.5px; }
+      #kz-lex .kz-lex-ctx { margin-top: 8px; color: #d8cbb6; font-size: 12.5px; }
+      #kz-lex .kz-lex-wait,
+      #kz-lex .kz-lex-err { margin-top: 8px; color: #cfc4b0; font-size: 12.5px; }
       #kz-marks {
         position: absolute;
         z-index: 42;
@@ -720,9 +982,48 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     `;
   }
 
+  const LIVE_FONTS = {
+    sans: { css: 'system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif', label: "无衬线" },
+    serif: { css: 'Georgia, "Songti SC", "SimSun", "Noto Serif SC", serif', label: "衬线" },
+    round: { css: '"Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif', label: "圆体" },
+    mono: { css: 'ui-monospace, "Cascadia Mono", "Sarasa Mono SC", "Microsoft YaHei", monospace', label: "等宽" },
+  };
+  const LIVE_SIZE_MIN = 13;
+  const LIVE_SIZE_MAX = 28;
+
+  let liveCcOn = false;
+  let liveMode = "bilingual";
+  let liveSize = 16;
+  let liveFont = "sans";
+  let liveVocab = new Set();
+  let liveSegments = [];
+  let liveTranslations = {};
+  let liveSegId = "";
+  let livePaintKey = "";
+  let liveContentKey = "";
+  let liveWordsKey = "";
+  let liveWord = "";
+  let liveMarks = new Set();
+  let liveDefCache = new Map();
+  let liveHoldIdx = -1;
+  let liveFront = 0;
+  let liveGeom = "";
+  let liveRaf = 0;
+  let liveNewT = 0;
+  let liveZhBusy = false;
+  let liveFetchedAt = "";
+  let liveZhAsked = new Set();
+  let liveZhFail = new Set();
+  let livePtrHoldT = 0;
+  let liveActAt = 0;
+  let liveActKind = "";
+  let livePaneFade = 0;
+
   function paintDock() {
-    const btn = document.querySelector("#kz-dock [data-act=loop]");
-    if (btn) btn.classList.toggle("on", Boolean(loopRange));
+    const loopBtn = document.querySelector("#kz-dock [data-act=loop]");
+    if (loopBtn) loopBtn.classList.toggle("on", Boolean(loopRange));
+    const ccBtn = document.querySelector("#kz-dock [data-act=cc]");
+    if (ccBtn) ccBtn.classList.toggle("on", liveCcOn);
   }
 
   function pingDock(act) {
@@ -744,8 +1045,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     else if (action === "open") toast(t("正在打开侧栏"));
   }
 
-  function openSidePanel() {
-    sayAction("open");
+  function openSidePanel(extra = {}) {
+    if (!extra.quiet) sayAction("open");
     chrome.runtime.sendMessage({ action: "vbOpenPanel", url: location.href, ...currentVideoInfo() }, (res) => {
       void chrome.runtime.lastError;
       if (!res?.ok) toast(t("点右上角 Kaizen 图标打开侧栏"));
@@ -762,6 +1063,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       <button type="button" data-act="loop" title="${t("再听这句")} A">A</button>
       <button type="button" data-act="note" title="${t("记笔记")}">N</button>
       <button type="button" data-act="mark" title="${t("夹在这里")}">B</button>
+      <button type="button" data-act="cc" title="${t("片上字幕条")}">C</button>
     `;
     const stopOnBtn = (event) => {
       if (!event.target.closest("button")) return;
@@ -789,6 +1091,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
       } else if (act === "quote") postHotkey("quote");
       else if (act === "mark") postHotkey("mark");
+      else if (act === "cc") setLiveCc(!liveCcOn);
     });
     return dock;
   }
@@ -994,7 +1297,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const resumeEl = box.querySelector(".kz-resume");
       if (resumeEl) resumeEl.style.left = `${Math.max(0, Math.min(100, (resume / dur) * 100))}%`;
     }
-    alignMarksBox(box, track, player);
+    if (opts.force || Date.now() - (paintPlayerMarks._alignAt || 0) > 400) {
+      paintPlayerMarks._alignAt = Date.now();
+      alignMarksBox(box, track, player);
+    }
     const walker = box.querySelector(".kz-walker");
     if (walker) walker.style.left = `${walkPct}%`;
     const resumeEl = box.querySelector(".kz-resume");
@@ -1004,22 +1310,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   function watchProgressDom() {
     const player = document.querySelector("#movie_player") || document.querySelector(".bpx-player-container");
-    if (!player || player.__kzObs) return;
-    let obsTimer = 0;
-    player.__kzObs = new MutationObserver(() => {
-      clearTimeout(obsTimer);
-      obsTimer = setTimeout(() => {
-        const box = document.getElementById("kz-marks");
-        if (!box || box.parentElement !== player) {
-          playerMarkKey = "";
-          paintPlayerMarks({ force: true });
-        } else {
-          paintNativeKnob();
-          alignMarksBox(box, progressHost(), player);
-        }
-      }, 80);
-    });
-    player.__kzObs.observe(player, { childList: true, subtree: true });
+    if (player?.__kzObs) {
+      try {
+        player.__kzObs.disconnect();
+      } catch (_e) {}
+      player.__kzObs = null;
+    }
+    if (watchProgressDom._t) return;
+    watchProgressDom._t = setInterval(() => {
+      if (!contentLive()) return;
+      const host = playerHost();
+      if (!host) return;
+      const box = document.getElementById("kz-marks");
+      if (!box || box.parentElement !== host) paintPlayerMarks({ force: true });
+      else {
+        paintNativeKnob();
+        alignMarksBox(box, progressHost(), host);
+      }
+    }, 480);
   }
 
   function placeDock(dock, player) {
@@ -1057,7 +1365,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (dock && dock.parentElement === document.body && dock.dataset.rev === String(VB_CONTENT_REV)) {
       placeDock(dock, host);
       paintDock();
-      paintPlayerMarks();
       return;
     }
     dock?.remove();
@@ -1098,8 +1405,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     box.id = "vb-keys";
     box.innerHTML = `<b>Kaizen</b><br>
       ${t("看进度条：夹过的点可以点跳。")}<br>
-      ${t("右下 K / R / A / N / B")}<br>
-      R ${t("记下这句")} · A ${t("再听")} · B ${t("夹书签")}<br>
+      ${t("右下 K / R / A / N / B / C")}<br>
+      R ${t("记下这句")} · A ${t("再听")} · B ${t("夹书签")} · C ${t("片上字幕条")}<br>
       ${t("点这张卡关掉")}`;
     Object.assign(box.style, {
       position: "fixed",
@@ -1185,13 +1492,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   function postHotkey(action, extra = {}) {
     const info = currentVideoInfo();
+    const seconds = Number(extra.seconds);
     const payload = {
       id: Date.now(),
       action,
       videoId: info.videoId || "",
       title: info.title || "",
-      seconds: info.currentTime || 0,
-      caption: pageCaption(),
+      seconds: Number.isFinite(seconds) ? seconds : info.currentTime || 0,
+      caption: extra.caption || pageCaption(),
       text: extra.text || "",
     };
     if (!extra.quiet) sayAction(action);
@@ -1283,6 +1591,946 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     true,
   );
 
+  function stripOldCaptionWraps() {
+    for (const el of document.querySelectorAll(".ytp-caption-segment, .bpx-player-subtitle-panel-text, .bpx-player-subtitle")) {
+      if (!el.querySelector(".kz-cc-w")) continue;
+      const plain = el.dataset.kzCc || String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      el.textContent = plain;
+      delete el.dataset.kzCc;
+    }
+  }
+
+  function escLive(text) {
+    return String(text || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function liveWordsHtml(text) {
+    const src = String(text || "");
+    const re = /\b[A-Za-z][A-Za-z'-]{1,39}\b/g;
+    let last = 0;
+    let html = "";
+    let m;
+    while ((m = re.exec(src))) {
+      html += escLive(src.slice(last, m.index));
+      const word = m[0];
+      const low = word.toLowerCase();
+      const cls = ["kz-cc-w"];
+      if (liveVocab.has(low)) cls.push("kz-cc-hit");
+      if (liveMarks.has(low)) cls.push("kz-cc-mark");
+      if (liveWord && liveWord.toLowerCase() === low) cls.push("on");
+      html += `<span class="${cls.join(" ")}" data-word="${escLive(word)}" role="button">${escLive(word)}</span>`;
+      last = m.index + word.length;
+    }
+    return html + escLive(src.slice(last));
+  }
+
+  function currentLiveSeg(seconds) {
+    if (!liveSegments.length) return null;
+    const t = Number(seconds) || 0;
+    let hit = liveSegments[0];
+    let idx = 0;
+    for (let i = 0; i < liveSegments.length; i++) {
+      if (liveSegments[i].start <= t + 0.05) {
+        hit = liveSegments[i];
+        idx = i;
+      } else break;
+    }
+    if (liveHoldIdx >= 0 && liveHoldIdx < liveSegments.length) {
+      const cur = liveSegments[liveHoldIdx];
+      const nextStart = liveSegments[liveHoldIdx + 1]?.start;
+      const holdEnd = Number(cur.end) || nextStart || cur.start + 4;
+      if (t >= cur.start - 0.2 && t < holdEnd + 0.08) {
+        return { seg: cur, idx: liveHoldIdx };
+      }
+    }
+    liveHoldIdx = idx;
+    return { seg: hit, idx };
+  }
+
+  function liveLineAt(seconds) {
+    const hit = currentLiveSeg(seconds);
+    return {
+      hit,
+      text: hit?.seg?.text || (!liveSegments.length ? pageCaption() : "") || "",
+      start: Number(hit?.seg?.start) || Number(seconds) || 0,
+      zh: hit ? String(liveTranslations[hit.idx] || "").trim() : "",
+    };
+  }
+
+  function liveMountHost() {
+    return document.fullscreenElement || document.webkitFullscreenElement || document.body || document.documentElement;
+  }
+
+  function mountLiveBar(bar) {
+    const host = liveMountHost();
+    if (!bar || !host) return host;
+    bar.dataset.host = host === document.body || host === document.documentElement ? "page" : "player";
+    if (bar.parentElement !== host) {
+      host.appendChild(bar);
+      liveGeom = "";
+    }
+    return host;
+  }
+
+  function liveOverlayRoot(event) {
+    const el = event.target;
+    if (!(el instanceof Element)) return null;
+    return el.closest("#kz-live, #kz-lex");
+  }
+
+  function liveBarBusy(bar) {
+    return Date.now() < livePtrHoldT || Boolean(bar?.matches(":active"));
+  }
+
+  function sayLiveWord(word = liveWord) {
+    try {
+      if (!word || !globalThis.speechSynthesis) return;
+      const utter = new SpeechSynthesisUtterance(word);
+      utter.lang = "en-US";
+      speechSynthesis.cancel();
+      speechSynthesis.speak(utter);
+    } catch (_e) {}
+  }
+
+  function liveSelectionText() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return "";
+    const text = String(sel).replace(/\s+/g, " ").trim();
+    if (text.length < 2) return "";
+    const node = sel.anchorNode;
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (!el?.closest?.("#kz-live .kz-live-en")) return "";
+    return text;
+  }
+
+  function handleLiveOverlayClick(event) {
+    if (event.target.closest("#kz-lex")) {
+      const act = event.target.closest("button[data-act]")?.dataset.act;
+      if (act === "mark") markLiveWord();
+      else if (act === "save") saveLiveWord();
+      else if (act === "close") {
+        closeLexCard();
+        paintLiveWordFlags();
+      } else if (act === "say") sayLiveWord();
+      else if (act === "retry" && liveWord) {
+        liveDefCache.delete(liveWord.toLowerCase());
+        openLexCard(liveWord);
+      }
+      return;
+    }
+    if (!event.target.closest("#kz-live")) return;
+    const act = event.target.closest("button[data-act]")?.dataset.act;
+    if (act === "jump") jumpLiveLine();
+    else if (act === "loop") loopLiveLine();
+    const wordBtn = event.target.closest(".kz-cc-w");
+    if (wordBtn) pickLiveWord(wordBtn.dataset.word);
+  }
+
+  function bindLivePointerGuard() {
+    const types = ["pointerdown", "mousedown", "mouseup", "click", "dblclick"];
+    const prev = globalThis.__kzLiveGuard;
+    if (typeof prev === "function") {
+      for (const type of types) document.removeEventListener(type, prev, true);
+    }
+    const on = (event) => {
+      if (!liveOverlayRoot(event)) return;
+      if (event.type === "pointerdown" || event.type === "mousedown") {
+        livePtrHoldT = Date.now() + 480;
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (event.type === "mouseup") {
+        livePtrHoldT = Date.now() + 180;
+        event.stopImmediatePropagation();
+        const span = event.target.closest("#kz-live") ? liveSelectionText() : "";
+        if (span) {
+          liveActKind = "sel-mark";
+          liveActAt = Date.now();
+          markLiveWord(span);
+        }
+        return;
+      }
+      event.stopImmediatePropagation();
+      if (event.type === "dblclick") return;
+      if (event.type === "click") event.preventDefault();
+      if (liveActKind === "sel-mark" && Date.now() - liveActAt < 320) return;
+      handleLiveOverlayClick(event);
+    };
+    globalThis.__kzLiveGuard = on;
+    for (const type of types) document.addEventListener(type, on, true);
+  }
+
+  function ensureLiveBar() {
+    let bar = document.getElementById("kz-live");
+    if (bar) {
+      mountLiveBar(bar);
+      return bar;
+    }
+    bar = document.createElement("div");
+    bar.id = "kz-live";
+    bar.hidden = true;
+    bar.innerHTML = `
+      <div class="kz-live-top">
+        <button type="button" data-act="jump">${t("跳这句")}</button>
+        <button type="button" data-act="loop">${t("再听")}</button>
+      </div>
+      <div class="kz-live-stage">
+        <div class="kz-live-pane on" data-pane="0">
+          <div class="kz-live-en"></div>
+          <div class="kz-live-zh"></div>
+        </div>
+        <div class="kz-live-pane" data-pane="1">
+          <div class="kz-live-en"></div>
+          <div class="kz-live-zh"></div>
+        </div>
+      </div>
+    `;
+    mountLiveBar(bar);
+    applyLiveStyle(bar);
+    return bar;
+  }
+
+  function applyLiveGeom(bar, left, width, bottom) {
+    const l = Math.round(left);
+    const w = Math.round(width);
+    const b = Math.round(bottom);
+    if (liveGeom) {
+      const [pl, pw, pb] = liveGeom.split("|").map(Number);
+      if (Math.abs(pl - l) < 4 && Math.abs(pw - w) < 6 && Math.abs(pb - b) < 4) return;
+    }
+    liveGeom = `${l}|${w}|${b}`;
+    bar.style.left = `${l}px`;
+    bar.style.width = `${w}px`;
+    bar.style.bottom = `${b}px`;
+  }
+
+  function placeLiveBar() {
+    const bar = document.getElementById("kz-live");
+    if (!bar || bar.hidden) return;
+    const host = mountLiveBar(bar);
+    const box = (playerHost() || pageVideo())?.getBoundingClientRect();
+    if (!box || box.width < 80) {
+      applyLiveGeom(bar, 12, Math.max(280, window.innerWidth - 24), 80);
+      placeLexCard();
+      return;
+    }
+    const chrome = document.querySelector(".ytp-chrome-bottom, .bpx-player-control-bottom, .bpx-player-control-wrap");
+    const chromeTop = chrome?.getBoundingClientRect().top;
+    const chromeH = Number.isFinite(chromeTop) ? Math.min(130, Math.max(0, box.bottom - chromeTop)) : 56;
+    const lift = Math.max(58, chromeH + 14);
+    const width = Math.min(760, Math.max(280, box.width * 0.78));
+    const leftView = box.left + (box.width - width) / 2;
+    const inPlayer = bar.dataset.host === "player" && host && host !== document.body && host !== document.documentElement;
+    if (inPlayer) {
+      const hr = host.getBoundingClientRect();
+      applyLiveGeom(bar, leftView - hr.left, width, Math.max(12, hr.bottom - box.bottom + lift));
+    } else {
+      applyLiveGeom(bar, leftView, width, Math.max(12, window.innerHeight - box.bottom + lift));
+    }
+    placeLexCard();
+  }
+
+  function compactDefHtml(def) {
+    const sense = (def?.senses || []).find((s) => s.zh || s.en) || {};
+    const zh = String(sense.zh || def?.meaning || "").trim();
+    const en = String(sense.en || "").trim();
+    const ph = String(def?.phonetic || "").trim();
+    const ctx = String(def?.inContext || "").trim();
+    return `
+      ${ph ? `<div class="kz-lex-ph">${escLive(ph)}</div>` : ""}
+      ${zh ? `<div class="kz-lex-zh">${escLive(zh)}</div>` : ""}
+      ${en ? `<div class="kz-lex-en">${escLive(en)}</div>` : ""}
+      ${ctx ? `<div class="kz-lex-ctx">${escLive(ctx)}</div>` : ""}
+    `;
+  }
+
+  function placeLexCard() {
+    const card = document.getElementById("kz-lex");
+    const bar = document.getElementById("kz-live");
+    if (!card || card.hidden || !bar || bar.hidden) return;
+    const host = mountLiveBar(card);
+    const br = bar.getBoundingClientRect();
+    const inPlayer = card.dataset.host === "player" && host && host !== document.body && host !== document.documentElement;
+    if (inPlayer) {
+      const hr = host.getBoundingClientRect();
+      card.style.left = `${Math.max(8, br.left - hr.left)}px`;
+      card.style.bottom = `${Math.max(8, hr.bottom - br.top + 8)}px`;
+    } else {
+      card.style.left = `${Math.max(12, br.left)}px`;
+      card.style.bottom = `${Math.max(12, window.innerHeight - br.top + 8)}px`;
+    }
+    card.style.width = `${Math.min(360, Math.max(240, br.width))}px`;
+  }
+
+  function closeLexCard() {
+    liveWord = "";
+    const card = document.getElementById("kz-lex");
+    if (card) card.hidden = true;
+  }
+
+  function ensureLexCard() {
+    let card = document.getElementById("kz-lex");
+    if (card) return card;
+    card = document.createElement("div");
+    card.id = "kz-lex";
+    card.hidden = true;
+    mountLiveBar(card);
+    return card;
+  }
+
+  function paintLexActions(card) {
+    const known = liveVocab.has(liveWord.toLowerCase());
+    const marked = liveMarks.has(liveWord.toLowerCase());
+    const acts = card.querySelector(".kz-lex-acts");
+    if (!acts) return;
+    acts.innerHTML = `
+      <button type="button" data-act="mark">${marked ? t("已划上") : t("划")}</button>
+      <button type="button" data-act="save">${known ? t("已在本") : t("存")}</button>
+      <button type="button" data-act="close">×</button>
+    `;
+  }
+
+  function fillLexBody(card, html) {
+    const body = card.querySelector(".kz-lex-body");
+    if (body) body.innerHTML = html;
+  }
+
+  function sendLiveBg(message) {
+    return new Promise((resolve) => {
+      if (!chrome.runtime?.id) {
+        resolve({ ok: false, error: t("扩展刚重载过，刷新这个视频页再试。") });
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage(message, (res) => {
+          const err = chrome.runtime.lastError?.message || "";
+          if (err) {
+            resolve({
+              ok: false,
+              error: /invalidated/i.test(err) ? t("扩展刚重载过，刷新这个视频页再试。") : err,
+            });
+            return;
+          }
+          resolve(res || { ok: false, error: t("查词失败") });
+        });
+      } catch (error) {
+        resolve({ ok: false, error: error.message || t("查词失败") });
+      }
+    });
+  }
+
+  function liveAiError(res) {
+    const raw = String(res?.error || "").trim();
+    if (res?.code === "NO_KEY" || /没有配置|DeepSeek Key|初始设置|NO_KEY|401|invalid api/i.test(raw)) {
+      return t("钥匙无效或还没填，去设置里看一下。");
+    }
+    if (/invalidated|context/i.test(raw)) return t("扩展刚重载过，刷新这个视频页再试。");
+    if (/402|insufficient|balance|额度|欠费/i.test(raw)) return t("DeepSeek 额度不够了，去官网看一下余额。");
+    if (/429|too many|频繁/i.test(raw)) return t("请求太密了，等几秒再试。");
+    if (/超时|timeout|Failed to fetch|network|网络/i.test(raw)) return t("网络卡住了，点重试。");
+    if (/JSON|格式乱了|释义为空|无效的词/i.test(raw)) return t("模型这次吐出来的格式乱了，再试一次。");
+    if (/[\u4e00-\u9fff]/.test(raw) && raw.length < 48) return raw;
+    return raw || t("查词失败");
+  }
+
+  function openLexCard(word) {
+    const card = ensureLexCard();
+    const line = liveLineAt(pageVideo()?.currentTime || 0);
+    const cached = liveDefCache.get(word.toLowerCase());
+    card.hidden = false;
+    card.dataset.word = word;
+    card.innerHTML = `
+      <div class="kz-lex-top">
+        <button type="button" class="kz-lex-word" data-act="say">${escLive(word)}</button>
+        <div class="kz-lex-acts"></div>
+      </div>
+      <div class="kz-lex-body">${cached ? compactDefHtml(cached) : `<div class="kz-lex-wait">${escLive(t("正在查词典…"))}</div>`}</div>
+    `;
+    paintLexActions(card);
+    placeLexCard();
+    if (cached) return;
+    chrome.storage.local.get("vb_vocab", async (stored) => {
+      if (liveWord !== word) return;
+      const hit = (stored.vb_vocab || []).find(
+        (v) => String(v.word || "").toLowerCase() === word.toLowerCase() && v.definition,
+      );
+      if (hit?.definition) {
+        liveDefCache.set(word.toLowerCase(), hit.definition);
+        fillLexBody(card, compactDefHtml(hit.definition));
+        return;
+      }
+      const res = await sendLiveBg({
+        action: "vbDefine",
+        word,
+        sentence: line.text,
+        videoTitle: currentVideoInfo().title || "",
+      });
+      if (liveWord !== word || !document.getElementById("kz-lex")) return;
+      if (!res?.ok || !res.definition) {
+        fillLexBody(
+          card,
+          `<div class="kz-lex-err">${escLive(liveAiError(res))}<button type="button" data-act="retry">${escLive(t("再试一次"))}</button></div>`,
+        );
+        return;
+      }
+      liveDefCache.set(word.toLowerCase(), res.definition);
+      fillLexBody(card, compactDefHtml(res.definition));
+    });
+  }
+
+  function liveModeOf(raw) {
+    return raw === "original" || raw === "zh" ? raw : "bilingual";
+  }
+
+  function paintLiveMode(bar = document.getElementById("kz-live")) {
+    if (!bar) return;
+    bar.dataset.mode = liveMode;
+  }
+
+  function setLiveMode(mode) {
+    const next = liveModeOf(mode);
+    if (next === liveMode) return;
+    liveMode = next;
+    chrome.storage.local.get("vb_settings", (stored) => {
+      if (stored.vb_settings?.transcriptMode === liveMode) return;
+      chrome.storage.local.set({ vb_settings: { ...(stored.vb_settings || {}), transcriptMode: liveMode } });
+    });
+    livePaintKey = "";
+    liveContentKey = "";
+    paintLiveBar();
+    if (liveMode !== "original") fillLiveZh();
+  }
+
+  function liveFontOf(raw) {
+    return LIVE_FONTS[raw] ? raw : "sans";
+  }
+
+  function liveSizeOf(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return 16;
+    return Math.min(LIVE_SIZE_MAX, Math.max(LIVE_SIZE_MIN, Math.round(n)));
+  }
+
+  function applyLiveStyle(bar = document.getElementById("kz-live")) {
+    if (!bar) return;
+    const face = LIVE_FONTS[liveFont] || LIVE_FONTS.sans;
+    bar.style.setProperty("--kz-live-size", `${liveSize}px`);
+    bar.style.setProperty("--kz-live-font", face.css);
+    bar.dataset.size = String(liveSize);
+    bar.dataset.font = liveFont;
+    const fontBtn = bar.querySelector("[data-act=font]");
+    if (fontBtn) {
+      fontBtn.textContent = t(face.label);
+      fontBtn.title = t("字体");
+    }
+  }
+
+  function liveZhAt(i) {
+    if (!Number.isInteger(i) || i < 0) return "";
+    return String(liveTranslations[i] || liveTranslations[String(i)] || "").trim();
+  }
+
+  function enoughLiveZh() {
+    if (!liveSegments.length) return false;
+    let n = 0;
+    const step = Math.max(1, Math.floor(liveSegments.length / 8));
+    for (let i = 0; i < liveSegments.length; i += step) {
+      if (liveZhAt(i)) n += 1;
+    }
+    return n >= Math.min(3, liveSegments.length);
+  }
+
+  function persistLiveTranslations() {
+    const id = videoIdFromUrl(location.href);
+    if (!id || !Object.keys(liveTranslations).length) return;
+    chrome.storage.local.get(`vb_cache_${id}`, (stored) => {
+      const pack = stored[`vb_cache_${id}`] || {};
+      chrome.storage.local.set({
+        [`vb_cache_${id}`]: {
+          ...pack,
+          videoId: id,
+          title: pack.title || currentVideoInfo().title || "",
+          segments: pack.segments?.length ? pack.segments : liveSegments,
+          translations: { ...(pack.translations || {}), ...liveTranslations },
+          savedAt: Date.now(),
+        },
+      });
+    });
+  }
+
+  async function translateLiveAround(idx) {
+    if (!Number.isInteger(idx) || liveMode === "original") return;
+    const want = [];
+    for (let d = 0; d <= 5 && want.length < 8; d++) {
+      for (const i of d === 0 ? [idx] : [idx - d, idx + d]) {
+        if (i < 0 || i >= liveSegments.length) continue;
+        const src = String(liveSegments[i]?.text || "").trim();
+        if (!src || liveZhAt(i) || liveZhAsked.has(i) || liveZhFail.has(i)) continue;
+        if ((src.match(/[\u4e00-\u9fff]/g) || []).length >= 4) continue;
+        want.push(i);
+      }
+    }
+    if (!want.length) return;
+    want.forEach((i) => liveZhAsked.add(i));
+    try {
+      const res = await chrome.runtime.sendMessage({
+        action: "vbTranslate",
+        lines: want.map((i) => liveSegments[i].text),
+      });
+      if (!res?.ok) {
+        want.forEach((i) => {
+          liveZhAsked.delete(i);
+          liveZhFail.add(i);
+        });
+        return;
+      }
+      const list = res.translations || [];
+      let wrote = false;
+      want.forEach((i, k) => {
+        const zh = String(list[k] || "").trim();
+        if (zh) {
+          liveTranslations[i] = zh;
+          liveZhFail.delete(i);
+          wrote = true;
+        } else {
+          liveZhFail.add(i);
+        }
+      });
+      if (wrote) persistLiveTranslations();
+    } catch (_e) {
+      want.forEach((i) => liveZhAsked.delete(i));
+    }
+  }
+
+  async function fillLiveZh() {
+    if (liveMode === "original" || liveZhBusy) return;
+    const id = videoIdFromUrl(location.href);
+    const idx = liveLineAt(pageVideo()?.currentTime || 0).hit?.idx;
+    if (Number.isInteger(idx) && liveZhAt(idx)) return;
+    liveZhBusy = true;
+    try {
+      if (id && liveFetchedAt !== id && !enoughLiveZh()) {
+        const data = await getTranscript(id);
+        liveFetchedAt = id;
+        if (data?.translations && Object.keys(data.translations).length) {
+          liveTranslations = { ...data.translations, ...liveTranslations };
+          persistLiveTranslations();
+        }
+      }
+      if (Number.isInteger(idx) && !liveZhAt(idx)) await translateLiveAround(idx);
+    } catch (_e) {
+      if (Number.isInteger(idx) && !liveZhAt(idx)) await translateLiveAround(idx);
+    } finally {
+      liveZhBusy = false;
+      livePaintKey = "";
+      liveContentKey = "";
+      paintLiveBar();
+    }
+  }
+
+  function paintLiveWordFlags(root = document.getElementById("kz-live")) {
+    if (!root) return;
+    const picked = String(liveWord || "").toLowerCase();
+    root.querySelectorAll(".kz-cc-w").forEach((btn) => {
+      const low = String(btn.dataset.word || "").toLowerCase();
+      btn.classList.toggle("kz-cc-hit", liveVocab.has(low));
+      btn.classList.toggle("kz-cc-mark", liveMarks.has(low));
+      btn.classList.toggle("on", Boolean(picked) && picked === low);
+    });
+  }
+
+  function fillLivePane(pane, line, { words = true } = {}) {
+    const en = pane.querySelector(".kz-live-en");
+    const zh = pane.querySelector(".kz-live-zh");
+    const hint = `<span style="font-weight:400;color:#cfc4b0;text-shadow:none">${escLive(t("打开侧栏读出字幕后，这里会跟上这一句。"))}</span>`;
+    if (liveMode === "zh") {
+      if (line.zh) {
+        en.hidden = false;
+        en.style.opacity = "0.62";
+        if (words) en.innerHTML = line.text ? liveWordsHtml(line.text) : "";
+        zh.textContent = line.zh;
+        zh.hidden = false;
+      } else if (line.text) {
+        en.hidden = false;
+        en.style.opacity = "";
+        if (words) en.innerHTML = liveWordsHtml(line.text);
+        zh.hidden = true;
+      } else {
+        en.hidden = false;
+        en.style.opacity = "";
+        if (words) en.innerHTML = hint;
+        zh.hidden = true;
+      }
+      return;
+    }
+    en.hidden = false;
+    en.style.opacity = "";
+    if (words) en.innerHTML = line.text ? liveWordsHtml(line.text) : hint;
+    if (liveMode === "original") {
+      zh.textContent = "";
+      zh.hidden = true;
+      return;
+    }
+    if (line.zh) {
+      zh.textContent = line.zh;
+      zh.hidden = false;
+      return;
+    }
+    const idx = line.hit?.idx;
+    if (Number.isInteger(idx) && liveZhFail.has(idx)) {
+      zh.textContent = t("这句没翻出来");
+      zh.hidden = false;
+      return;
+    }
+    if (liveZhBusy || (Number.isInteger(idx) && liveZhAsked.has(idx))) {
+      zh.textContent = t("正在对照…");
+      zh.hidden = false;
+      return;
+    }
+    zh.textContent = "";
+    zh.hidden = true;
+  }
+
+  function stopLiveTick() {
+    if (liveRaf) cancelAnimationFrame(liveRaf);
+    liveRaf = 0;
+    if (stopLiveTick._t) clearTimeout(stopLiveTick._t);
+    stopLiveTick._t = 0;
+  }
+
+  function startLiveTick() {
+    if (stopLiveTick._t || liveRaf) return;
+    const pulse = () => {
+      stopLiveTick._t = 0;
+      liveRaf = 0;
+      if (!contentLive() || !liveCcOn) return;
+      paintLiveBar();
+      stopLiveTick._t = setTimeout(pulse, 220);
+    };
+    pulse();
+  }
+
+  function liveCaptionReady() {
+    return liveSegments.length > 0 || Boolean(String(pageCaption() || "").trim());
+  }
+
+  function applyLiveSkin(bar) {
+    document.documentElement.classList.toggle("kz-live-on", liveCcOn && liveCaptionReady());
+    if (bar) {
+      bar.classList.toggle("is-pick", Boolean(liveWord));
+      if (liveCcOn && Date.now() < liveNewT) bar.classList.add("is-new");
+      else bar.classList.remove("is-new");
+    }
+  }
+
+  function paintLiveBar() {
+    if (!liveCcOn) {
+      const bar = document.getElementById("kz-live");
+      if (bar) bar.hidden = true;
+      document.documentElement.classList.remove("kz-live-on");
+      closeLexCard();
+      stopLiveTick();
+      livePaintKey = "";
+      liveContentKey = "";
+      liveWordsKey = "";
+      liveGeom = "";
+      return;
+    }
+    const bar = ensureLiveBar();
+    applyLiveSkin(bar);
+    applyLiveStyle(bar);
+    paintLiveMode(bar);
+    bar.hidden = false;
+    if (!liveBarBusy(bar)) placeLiveBar();
+    else placeLexCard();
+    const line = liveLineAt(pageVideo()?.currentTime || 0);
+    if (liveMode !== "original" && !line.zh) {
+      const idx = line.hit?.idx;
+      if (!Number.isInteger(idx) || (!liveZhFail.has(idx) && !liveZhAsked.has(idx) && !liveZhBusy)) fillLiveZh();
+    }
+    const contentKey = `${line.hit?.idx ?? -1}\n${line.text}\n${liveMode}`;
+    const wordsKey = `${contentKey}\n${liveVocab.size}\n${[...liveMarks].join(",")}`;
+    const zhKey = `${line.zh}\n${liveZhBusy}\n${Number.isInteger(line.hit?.idx) && liveZhFail.has(line.hit.idx)}`;
+    const paintKey = `${wordsKey}\n${zhKey}`;
+    if (paintKey === livePaintKey) return;
+    const panes = bar.querySelectorAll(".kz-live-pane");
+    if (!panes.length) return;
+    const rewriteWords = wordsKey !== liveWordsKey;
+    const busy = liveBarBusy(bar);
+    if (busy && contentKey !== liveContentKey) return;
+    if (busy) {
+      fillLivePane(panes[liveFront], line, { words: false });
+      livePaintKey = paintKey;
+      return;
+    }
+    if (!liveContentKey) {
+      fillLivePane(panes[0], line, { words: true });
+      panes[0].classList.add("on");
+      panes[1]?.classList.remove("on");
+      liveFront = 0;
+    } else if (contentKey !== liveContentKey) {
+      const next = liveFront ^ 1;
+      const prev = panes[liveFront];
+      fillLivePane(panes[next], line, { words: true });
+      panes[next]?.classList.add("on");
+      liveFront = next;
+      if (livePaneFade) clearTimeout(livePaneFade);
+      livePaneFade = setTimeout(() => {
+        livePaneFade = 0;
+        const front = document.getElementById("kz-live")?.querySelectorAll(".kz-live-pane")[liveFront];
+        if (prev && prev !== front) prev.classList.remove("on");
+      }, 260);
+    } else {
+      fillLivePane(panes[liveFront], line, { words: rewriteWords });
+    }
+    liveContentKey = contentKey;
+    liveWordsKey = wordsKey;
+    livePaintKey = paintKey;
+  }
+
+  async function ensureLiveSegments() {
+    const id = videoIdFromUrl(location.href);
+    if (!id) return [];
+    if (liveSegId === id && liveSegments.length) return liveSegments;
+    try {
+      const cached = await chrome.storage.local.get([`vb_cache_${id}`, "vb_live"]);
+      const pack = cached[`vb_cache_${id}`];
+      const live = cached.vb_live?.videoId === id ? cached.vb_live.segments : null;
+      const segs = live?.length ? live : pack?.segments;
+      if (pack?.translations) liveTranslations = { ...pack.translations, ...liveTranslations };
+      if (segs?.length) {
+        liveSegments = segs;
+        liveSegId = id;
+        if (liveMode !== "original") fillLiveZh();
+        return liveSegments;
+      }
+    } catch (_e) {}
+    try {
+      const data = await getTranscript(id);
+      liveSegments = data.segments || [];
+      liveSegId = id;
+      liveFetchedAt = id;
+      if (data.translations && Object.keys(data.translations).length) {
+        liveTranslations = { ...data.translations, ...liveTranslations };
+        persistLiveTranslations();
+      }
+    } catch (_e) {
+      liveSegments = [];
+    }
+    if (liveMode !== "original") fillLiveZh();
+    return liveSegments;
+  }
+
+  function peekLiveLine(extra = {}) {
+    const line = liveLineAt(Number.isFinite(Number(extra.seconds)) ? extra.seconds : pageVideo()?.currentTime || 0);
+    postHotkey("peek", {
+      quiet: true,
+      seconds: line.start,
+      caption: line.text,
+    });
+  }
+
+  async function jumpLiveLine() {
+    const video = pageVideo();
+    if (!video) return;
+    await ensureLiveSegments();
+    const line = liveLineAt(video.currentTime);
+    if (!line.hit) {
+      toast(t("这页还没有可读字幕"));
+      return;
+    }
+    if (Math.abs(video.currentTime - line.start) > 0.35) video.currentTime = line.start;
+    video.play().catch(() => {});
+    peekLiveLine({ seconds: line.start });
+    toast(t("跳到这句"));
+  }
+
+  function loopLiveLine() {
+    if (loopRange) {
+      clearLoopWait();
+      loopRange = null;
+      postHotkey("unloop");
+      paintDock();
+      return;
+    }
+    const video = pageVideo();
+    const line = liveLineAt(video?.currentTime || 0);
+    if (line.hit && video) {
+      loopRange = { start: line.start, end: Number(line.hit.seg.end) || line.start + 6 };
+      video.currentTime = loopRange.start;
+      video.play().catch(() => {});
+    }
+    postHotkey("loop", { seconds: line.start, caption: line.text });
+    paintDock();
+  }
+
+  function pickLiveWord(word) {
+    const next = String(word || "").trim();
+    if (next.length < 2) return;
+    const card = document.getElementById("kz-lex");
+    if (liveWord.toLowerCase() === next.toLowerCase() && card && !card.hidden) {
+      closeLexCard();
+      paintLiveWordFlags();
+      return;
+    }
+    liveWord = next;
+    openLexCard(next);
+    paintLiveWordFlags();
+  }
+
+  function saveLiveWord() {
+    if (!liveWord) return;
+    const line = liveLineAt(pageVideo()?.currentTime || 0);
+    liveVocab.add(liveWord.toLowerCase());
+    postHotkey("vocab", { text: liveWord, quiet: true, seconds: line.start, caption: line.text });
+    const card = document.getElementById("kz-lex");
+    if (card) paintLexActions(card);
+    paintLiveWordFlags();
+    toast(t("已存入生词本"));
+  }
+
+  function markLiveWord(raw) {
+    const next = String(raw || liveWord || "").replace(/\s+/g, " ").trim();
+    if (next.length < 2) return;
+    if (!liveWord) liveWord = (next.match(/\b[A-Za-z][A-Za-z'-]{1,39}\b/) || [next])[0];
+    const line = liveLineAt(pageVideo()?.currentTime || 0);
+    const info = currentVideoInfo();
+    const sentence = String(line.text || "").trim() || next;
+    if (!info.videoId) {
+      toast(t("先打开一支视频再划。"));
+      return;
+    }
+    chrome.storage.local.get(["vb_highlights", "vb_settings"], (stored) => {
+      const list = Array.isArray(stored.vb_highlights) ? stored.vb_highlights.slice() : [];
+      const exists = list.some(
+        (h) =>
+          h.videoId === info.videoId &&
+          String(h.text || "").toLowerCase() === next.toLowerCase() &&
+          Math.abs(Number(h.seconds) - line.start) < 0.8,
+      );
+      const words = next.match(/\b[A-Za-z][A-Za-z'-]{1,39}\b/g) || [next];
+      words.forEach((w) => liveMarks.add(w.toLowerCase()));
+      const card = document.getElementById("kz-lex");
+      if (card) paintLexActions(card);
+      paintLiveWordFlags();
+      if (exists) {
+        toast(t("这句已经划过"));
+        return;
+      }
+      const created = {
+        id: `h-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        videoId: info.videoId,
+        videoTitle: info.title || "",
+        text: next,
+        sentence,
+        seconds: line.start,
+        spans: [
+          {
+            text: next,
+            sentence,
+            seconds: line.start,
+            idx: line.hit?.idx ?? -1,
+          },
+        ],
+        color: stored.vb_settings?.hlColor || "def",
+        style: stored.vb_settings?.hlStyle || "line",
+        createdAt: Date.now(),
+      };
+      list.unshift(created);
+      chrome.storage.local.set({ vb_highlights: list.slice(0, 800) }, () => {
+        postHotkey("highlight", { quiet: true, text: next, seconds: line.start, caption: sentence });
+        toast(t("已划上"));
+      });
+    });
+  }
+
+  function setLiveCc(on) {
+    const next = Boolean(on);
+    const changed = next !== liveCcOn;
+    liveCcOn = next;
+    chrome.storage.local.get("vb_settings", (stored) => {
+      if (stored.vb_settings?.liveCc === liveCcOn) return;
+      chrome.storage.local.set({ vb_settings: { ...(stored.vb_settings || {}), liveCc: liveCcOn } });
+    });
+    livePaintKey = "";
+    liveContentKey = "";
+    liveGeom = "";
+    if (!liveCcOn) {
+      closeLexCard();
+      document.documentElement.classList.remove("kz-live-on");
+      stopLiveTick();
+    } else {
+      liveNewT = Date.now() + 1600;
+      startLiveTick();
+    }
+    paintDock();
+    paintLiveBar();
+    if (changed) toast(liveCcOn ? t("片上字幕条开了。点词出词卡，可划可存。") : t("已关掉片上字幕条"));
+    if (liveCcOn) ensureLiveSegments().then(() => { livePaintKey = ""; liveContentKey = ""; paintLiveBar(); });
+  }
+
+  function loadLiveMarks(list, videoId) {
+    liveMarks = new Set();
+    for (const h of list || []) {
+      if (videoId && h.videoId && h.videoId !== videoId) continue;
+      const words = String(h.text || "").match(/\b[A-Za-z][A-Za-z'-]{1,39}\b/g) || [];
+      for (const w of words) liveMarks.add(w.toLowerCase());
+    }
+  }
+
+  function loadLiveCcState() {
+    chrome.storage.local.get(["vb_settings", "vb_vocab", "vb_highlights"], (stored) => {
+      liveCcOn = stored.vb_settings?.liveCc === true;
+      liveMode = liveModeOf(stored.vb_settings?.transcriptMode);
+      liveSize = liveSizeOf(stored.vb_settings?.liveCcSize);
+      liveFont = liveFontOf(stored.vb_settings?.liveCcFont);
+      liveVocab = new Set(
+        (stored.vb_vocab || [])
+          .map((v) => String(v.word || "").toLowerCase())
+          .filter((w) => w.length >= 2),
+      );
+      loadLiveMarks(stored.vb_highlights, videoIdFromUrl(location.href));
+      livePaintKey = "";
+      liveContentKey = "";
+      paintDock();
+      paintLiveBar();
+      if (liveCcOn) {
+        liveNewT = Date.now() + 1600;
+        startLiveTick();
+        ensureLiveSegments().then(() => { livePaintKey = ""; liveContentKey = ""; paintLiveBar(); });
+      } else {
+        stopLiveTick();
+      }
+    });
+  }
+
+  function bindLiveCc() {
+    if (document.documentElement.dataset.kzCcBound === String(VB_CONTENT_REV)) return;
+    document.documentElement.dataset.kzCcBound = String(VB_CONTENT_REV);
+    stripOldCaptionWraps();
+    bindLivePointerGuard();
+    window.addEventListener("resize", () => {
+      if (contentLive() && liveCcOn) {
+        liveGeom = "";
+        placeLiveBar();
+      }
+    });
+    const onFs = () => {
+      if (!contentLive() || !liveCcOn) return;
+      liveGeom = "";
+      const bar = document.getElementById("kz-live");
+      if (bar) mountLiveBar(bar);
+      const card = document.getElementById("kz-lex");
+      if (card) mountLiveBar(card);
+      placeLiveBar();
+    };
+    document.addEventListener("fullscreenchange", onFs);
+    document.addEventListener("webkitfullscreenchange", onFs);
+  }
+
   function announceWatch() {
     const info = currentVideoInfo();
     chrome.runtime.sendMessage({ action: "vbTick", ...info }, () => void chrome.runtime.lastError);
@@ -1291,13 +2539,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!chrome.runtime?.id) throw new Error("invalidated");
     if (!contentLive()) throw new Error("stale");
     document.getElementById("kz-dock")?.remove();
+    document.getElementById("kz-live")?.remove();
+    document.getElementById("kz-lex")?.remove();
+    document.documentElement.classList.remove("kz-live-on");
     ensureDock();
     paintDock();
     loadPlayerMarks();
+    loadLiveCcState();
   }
   globalThis.__vbRemountDock = remountDock;
   ensureDock();
   loadPlayerMarks();
+  bindLiveCc();
+  loadLiveCcState();
   announceWatch();
   setInterval(() => {
     if (!contentLive()) return;
@@ -1312,16 +2566,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     playerMarkKey = "";
     ensureDock();
     loadPlayerMarks();
+    liveSegId = "";
+    liveSegments = [];
+    liveTranslations = {};
+    liveFetchedAt = "";
+    liveZhAsked = new Set();
+    liveZhFail = new Set();
+    liveZhBusy = false;
+    liveWord = "";
+    closeLexCard();
+    livePaintKey = "";
+    liveContentKey = "";
+    liveWordsKey = "";
+    liveHoldIdx = -1;
+    liveGeom = "";
+    loadLiveCcState();
     announceWatch();
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (!contentLive() || area !== "local") return;
+    if (changes.vb_vocab || changes.vb_settings) loadLiveCcState();
+    if (changes.vb_highlights) {
+      loadLiveMarks(changes.vb_highlights.newValue, videoIdFromUrl(location.href));
+      livePaintKey = "";
+      if (liveCcOn) paintLiveBar();
+    }
+    const cacheChanged = Boolean(changes.vb_live) || Object.keys(changes).some((key) => key.startsWith("vb_cache_"));
+    if (cacheChanged) {
+      liveSegId = "";
+      if (liveCcOn) ensureLiveSegments().then(() => { livePaintKey = ""; liveContentKey = ""; liveHoldIdx = -1; paintLiveBar(); });
+    }
     if (
       changes.vb_marks ||
       changes.vb_settings ||
       changes.vb_shelf ||
       changes.vb_watch_resume ||
-      Object.keys(changes).some((key) => key.startsWith("vb_cache_"))
+      cacheChanged
     ) {
       loadPlayerMarks();
     }

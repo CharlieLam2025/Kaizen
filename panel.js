@@ -99,7 +99,7 @@ const state = {
   dives: {},
   scripts: {},
   translations: {},
-  transcriptMode: "bilingual",
+    transcriptMode: "bilingual",
   chat: [],
   askContext: null,
   study: null,
@@ -122,6 +122,9 @@ const state = {
 };
 
 let loadingVideoId = null;
+let videoJob = 0;
+let pendingSeek = null;
+let followPausedByUser = false;
 let transcriptFailId = "";
 let transcriptFailAt = 0;
 let isTranslating = false;
@@ -228,8 +231,7 @@ function activateView(name) {
   }
   paintView(name);
   if (name === "bricks") {
-    if (!state.blocks.length) analyzeBlocks();
-    if (!state.study) loadStudyPack();
+    if (!state.blocks.length) setBrickStatus(t("点「拆」才拆页，不会一打开就花额度。"));
   }
   if (name === "read" && followPlayback) {
     lastFollowedStart = -1;
@@ -339,13 +341,26 @@ function cleanZh(text) {
     .trim();
 }
 
+function translationKind(zh, en) {
+  const cleaned = cleanZh(zh);
+  if (!cleaned) return "empty";
+  if (looksLikeFailedZh(cleaned)) return "error";
+  if (typeof sameAsSource === "function" && sameAsSource(cleaned, en)) return "echo";
+  return "ok";
+}
+
+function isRealTranslation(zh, en) {
+  return translationKind(zh, en) === "ok";
+}
+
 function translationAt(i) {
-  return cleanZh(state.translations[i]);
+  const cleaned = cleanZh(state.translations[i]);
+  if (!isRealTranslation(cleaned, state.segments[i]?.text)) return "";
+  return cleaned;
 }
 
 function clock(seconds) {
-  const s = Math.max(0, Math.floor(Number(seconds) || 0));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return typeof formatClock === "function" ? formatClock(seconds) : `${Math.floor(Math.max(0, Number(seconds) || 0) / 60)}:${String(Math.max(0, Math.floor(Number(seconds) || 0)) % 60).padStart(2, "0")}`;
 }
 
 function uid(prefix) {
@@ -736,10 +751,13 @@ function scrollToSeconds(seconds) {
 
 function pauseFollowFromUser(event) {
   if (programmaticScroll || Date.now() < followLockUntil) return;
-  if (event && Math.abs(event.deltaY || event.deltaX || 0) < 2) return;
+  const box = $("transcriptBox");
+  const el = event?.target;
+  if (!box || !el || (el !== box && !box.contains(el))) return;
+  if (event && event.type === "wheel" && Math.abs(event.deltaY || event.deltaX || 0) < 2) return;
   lastUserScrollAt = Date.now();
   if (!followPlayback) return;
-  followPlayback = false;
+  followPausedByUser = true;
   updateFollowBtn();
 }
 
@@ -763,6 +781,10 @@ function applyPlayhead(info) {
   paintMarkWalker(info.currentTime);
   const active = paintPlayingRow(info.currentTime);
   if (!followPlayback || !active || !isReadView()) return;
+  if (followPausedByUser) {
+    if (isRowNearCenter(active, 80)) followPausedByUser = false;
+    else return;
+  }
   if (Date.now() < followLockUntil) return;
   const start = Number(active.dataset.start);
   if (start === lastFollowedStart && isRowNearCenter(active, 48)) return;
@@ -776,12 +798,7 @@ async function followTickWork() {
 }
 
 function parseJumpInput(raw) {
-  const text = String(raw || "").trim().replace("：", ":");
-  if (!text) return null;
-  const clockMatch = text.match(/^(\d{1,3}):([0-5]?\d)$/);
-  if (clockMatch) return Number(clockMatch[1]) * 60 + Number(clockMatch[2]);
-  const sec = Number(text);
-  return Number.isFinite(sec) && sec >= 0 ? sec : null;
+  return typeof parseClockInput === "function" ? parseClockInput(raw) : null;
 }
 
 let focusMode = false;
@@ -812,8 +829,8 @@ function syncLangButtons() {
 function updateFollowBtn() {
   const btn = $("followBtn");
   if (!btn) return;
-  btn.classList.toggle("active", followPlayback);
-  btn.textContent = followPlayback ? "跟随" : "已停";
+  btn.classList.toggle("active", followPlayback && !followPausedByUser);
+  btn.textContent = followPlayback && !followPausedByUser ? "跟随" : "已停";
 }
 
 function watchSnapToTab(snap) {
@@ -897,14 +914,28 @@ function tabVideoId(tab) {
 }
 
 async function findWatchTab() {
+  try {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active && isWatchHost(tabHref(active))) {
+      const tab = {
+        id: active.id,
+        url: tabHref(active),
+        title: active.title || "",
+        active: true,
+        videoId: tabVideoId(active) || videoIdFromHref(tabHref(active)),
+      };
+      watchTabCache = { at: Date.now(), tab };
+      return tab;
+    }
+  } catch (_e) {}
   if (watchTabCache.tab && Date.now() - watchTabCache.at < 800 && tabVideoId(watchTabCache.tab)) {
     return watchTabCache.tab;
   }
   const listed = await listWatchTabs();
-  let picked = listed.find((tab) => tabVideoId(tab)) || listed[0] || null;
-  if (state.videoId && state.tabId) {
-    const pinned = listed.find((tab) => Number(tab.id) === Number(state.tabId));
-    if (pinned) picked = pinned;
+  let picked = listed.find((tab) => tab.active && isWatchHost(tabHref(tab))) || null;
+  if (!picked) {
+    const pinned = state.tabId ? listed.find((tab) => Number(tab.id) === Number(state.tabId)) : null;
+    if (pinned && !listed.some((tab) => tab.active && isWatchHost(tabHref(tab)))) picked = pinned;
   }
   if (!picked) {
     watchTabCache = { at: Date.now(), tab: null };
@@ -925,13 +956,12 @@ let pendingWatchInfo = null;
 
 function markWatchStage(stage, extra = {}) {
   chrome.storage.local
-    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.5", ...extra } })
+    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.6", ...extra } })
     .catch(() => {});
 }
 
 function takeIncomingWatch(info) {
   const videoId = info?.videoId || videoIdFromHref(info?.url || "");
-  if (!videoId) return;
   const next = { ...info, videoId };
   if (!keysReady()) {
     pendingWatchInfo = next;
@@ -945,6 +975,12 @@ function takeIncomingWatch(info) {
     segments: state.segments.length,
     loadingVideoId,
   });
+  if (decision === "clear") {
+    if (next.tabId) state.tabId = next.tabId;
+    clearOpenedVideo(t("这页没有可读视频"));
+    return;
+  }
+  if (!videoId) return;
   if (decision === "keep") {
     if (
       next.tabId &&
@@ -961,6 +997,30 @@ function takeIncomingWatch(info) {
   if (next.tabId) state.tabId = next.tabId;
   markWatchStage("loading", { videoId, tabId: state.tabId, source: next.source || "" });
   loadVideo(videoId, next.title || "", { force: Boolean(next.force || next.source === "user") });
+}
+
+function clearOpenedVideo(reason) {
+  videoJob += 1;
+  loadingVideoId = null;
+  isTranslating = false;
+  isAnalyzing = false;
+  isStudying = false;
+  Object.assign(state, {
+    videoId: null,
+    title: "",
+    language: "",
+    segments: [],
+    gist: "",
+    blocks: [],
+    translations: {},
+    study: null,
+    lastSeconds: 0,
+    translateFailed: {},
+  });
+  transcriptFailId = "";
+  transcriptFailAt = 0;
+  markWatchStage("cleared", { reason: String(reason || "").slice(0, 120) });
+  showStateBox("K", t("这页没有可读视频"), reason || t("换到一支能播的 YouTube 或 B 站，或把链接贴在下面。"), false, true);
 }
 
 function queueIncomingWatch(info, source) {
@@ -1021,23 +1081,14 @@ async function adoptActiveWatchNow() {
     } catch (_e) {}
   }
   try {
-    const stored = await chrome.storage.local.get(["vb_click", "vb_watch"]);
-    const snap = stored.vb_click || stored.vb_watch;
-    const id = snap?.videoId || videoIdFromHref(snap?.url || "");
-    if (id) {
-      takeIncomingWatch({ videoId: id, title: snap.title || "", tabId: snap.tabId, url: snap.url, source: "storage" });
-      return true;
-    }
-  } catch (_e) {}
-  try {
-    const all = await chrome.tabs.query({});
-    const hit = (all || []).find((tab) => videoIdFromHref(tabHref(tab)));
-    if (hit) {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active && isWatchHost(tabHref(active)) && !videoIdFromHref(tabHref(active))) {
       takeIncomingWatch({
-        videoId: videoIdFromHref(tabHref(hit)),
-        title: hit.title || "",
-        tabId: hit.id,
-        url: tabHref(hit),
+        title: active.title || "",
+        tabId: active.id,
+        url: tabHref(active),
+        watchPage: true,
+        activeWatch: true,
         source: "adopt",
       });
       return true;
@@ -1096,7 +1147,7 @@ let autoOpenKey = "";
 function maybeAutoOpenWatch(tabs) {
   if (!keysReady() || state.videoId || loadingVideoId || reviewOnly) return;
   if (transcriptFailId && Date.now() - transcriptFailAt < 12000) return;
-  const hit = (tabs || []).find((tab) => tabVideoId(tab));
+  const hit = (tabs || []).find((tab) => tab.active && tabVideoId(tab));
   if (!hit) return;
   const id = tabVideoId(hit);
   if (!id || autoOpenKey === id) return;
@@ -1106,8 +1157,40 @@ function maybeAutoOpenWatch(tabs) {
     title: hit.title || "",
     tabId: hit.id,
     url: hit.url || "",
+    activeWatch: true,
     source: "adopt",
   });
+}
+
+function captionsOnlyMode() {
+  return settingsCache.captionsOnly !== false;
+}
+
+const LIVE_CC_FONTS = ["sans", "serif", "round", "mono"];
+
+function liveCcSizeOf(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 16;
+  return Math.min(28, Math.max(13, Math.round(n)));
+}
+
+function liveCcFontOf(raw) {
+  return LIVE_CC_FONTS.includes(raw) ? raw : "sans";
+}
+
+function paintLiveStyleSettings() {
+  const size = liveCcSizeOf(settingsCache.liveCcSize);
+  const font = liveCcFontOf(settingsCache.liveCcFont);
+  if ($("setLiveSizeLabel")) $("setLiveSizeLabel").textContent = String(size);
+  $("setLiveFont")?.querySelectorAll("[data-font]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.font === font);
+  });
+}
+
+function preferredTranscriptMode() {
+  const mode = settingsCache.transcriptMode || state.transcriptMode || "bilingual";
+  if (mode === "original" || mode === "zh" || mode === "bilingual") return mode;
+  return "bilingual";
 }
 
 async function paintStateTabs() {
@@ -1221,9 +1304,17 @@ async function ensureContentScript(tabId, { skipPing } = {}) {
   injectingContent = true;
   lastInjectAt = Date.now();
   try {
+    let hasCore = false;
+    try {
+      const [shot] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => Boolean(globalThis.__KAIZEN_CS__?.i18n && globalThis.__KAIZEN_CS__?.site),
+      });
+      hasCore = Boolean(shot?.result);
+    } catch (_e) {}
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["i18n.js", "i18n-dict.js", "site.js", "content.js"],
+      files: hasCore ? ["content.js"] : ["i18n.js", "i18n-dict.js", "site.js", "content.js"],
     });
     contentReadyAt = Date.now();
     contentReadyTab = tabId;
@@ -1236,15 +1327,17 @@ async function ensureContentScript(tabId, { skipPing } = {}) {
 }
 
 function linkifyTimes(text) {
-  return esc(text).replace(/\[(\d{1,3}):([0-5]\d)\]/g, (_m, min, sec) => {
-    const s = Number(min) * 60 + Number(sec);
-    return `<span class="time-link" data-s="${s}">[${min}:${sec}]</span>`;
+  return esc(text).replace(/\[(\d{1,3}):([0-5]\d)(?::([0-5]\d))?\]/g, (_m, a, b, c) => {
+    const s = c != null ? Number(a) * 3600 + Number(b) * 60 + Number(c) : Number(a) * 60 + Number(b);
+    return `<span class="time-link" data-s="${s}">${_m}</span>`;
   });
 }
 
 function parseClock(label) {
-  const m = String(label || "").match(/(\d{1,3}):([0-5]\d)/);
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  const m = String(label || "").match(/(\d{1,3}):([0-5]\d)(?::([0-5]\d))?/);
+  if (!m) return null;
+  if (m[3] != null) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  return Number(m[1]) * 60 + Number(m[2]);
 }
 
 // ---------- storage ----------
@@ -1267,19 +1360,31 @@ async function loadSettings() {
   watchRate = playbackRate;
   shadowRate = nearestPlayRate(settingsCache.shadowRate || 0.75);
   state.shadowGap = settingsCache.shadowGap !== false;
-  setUiLang(settingsCache.uiLang || detectLang());
+  setUiLang(settingsCache.uiLang || "zh-CN");
+  if (settingsCache.captionsOnly == null) settingsCache.captionsOnly = true;
   applyTheme(settingsCache.uiTheme || "paper");
   applyTypeSize();
   applyPlayRate(playbackRate, false);
+  let persist = false;
   if (!settingsCache.clientId) {
     settingsCache.clientId = uid("kz");
-    await chrome.storage.local.set({ vb_settings: settingsCache });
+    persist = true;
   }
+  if (!["original", "bilingual", "zh"].includes(settingsCache.transcriptMode)) {
+    settingsCache.transcriptMode = "bilingual";
+    persist = true;
+  }
+  if (persist) await chrome.storage.local.set({ vb_settings: settingsCache });
+  state.transcriptMode = preferredTranscriptMode();
   return settingsCache;
 }
 
 async function saveSettings(next) {
-  settingsCache = { ...settingsCache, ...next };
+  let stored = {};
+  try {
+    stored = (await chrome.storage.local.get("vb_settings")).vb_settings || {};
+  } catch (_e) {}
+  settingsCache = { ...stored, ...settingsCache, ...next };
   await chrome.storage.local.set({ vb_settings: settingsCache });
   if (next.uiTheme) applyTheme(next.uiTheme);
   paintModelSwitch();
@@ -1362,6 +1467,128 @@ function resolveVocabLevel() {
   return { ...raw, label: t(raw.label) };
 }
 
+let wordFreqList = [];
+let wordPacksHave = {};
+
+function wordPackIds() {
+  return globalThis.WordLevel?.PACK_IDS || ["cet4", "cet6", "kaoyan", "ielts", "toefl", "sat", "gre"];
+}
+
+function wordPackReady(id) {
+  if (id === "off") return false;
+  return wordFreqList.length > 1000;
+}
+
+async function loadWordPacks() {
+  try {
+    const stored = await chrome.storage.local.get(["vb_wordfreq", "vb_wordpacks"]);
+    if (Array.isArray(stored.vb_wordfreq) && stored.vb_wordfreq.length > 1000) {
+      wordFreqList = stored.vb_wordfreq.map((w) => String(w || "").toLowerCase()).filter(Boolean);
+    }
+    wordPacksHave = stored.vb_wordpacks && typeof stored.vb_wordpacks === "object" ? stored.vb_wordpacks : {};
+  } catch (_e) {
+    wordPacksHave = {};
+  }
+}
+
+async function ensureWordFreq() {
+  if (wordFreqList.length > 1000) return wordFreqList;
+  await loadWordPacks();
+  if (wordFreqList.length > 1000) return wordFreqList;
+  const res = await fetch(chrome.runtime.getURL("packs/english-freq.txt"));
+  if (!res.ok) throw new Error(t("词汇包还没准备好。"));
+  const text = await res.text();
+  const seen = new Set();
+  const words = [];
+  for (const raw of String(text || "").split(/\s+/)) {
+    const w = raw.toLowerCase();
+    if (!/^[a-z][a-z'-]{1,39}$/.test(w) || seen.has(w)) continue;
+    seen.add(w);
+    words.push(w);
+  }
+  if (words.length < 1000) throw new Error(t("词汇包还没准备好。"));
+  wordFreqList = words;
+  await chrome.storage.local.set({ vb_wordfreq: words });
+  return words;
+}
+
+async function installWordPack(id, { all = false } = {}) {
+  const freq = await ensureWordFreq();
+  const next = { ...wordPacksHave };
+  const at = Date.now();
+  for (const packId of wordPackIds()) {
+    const known = Number(globalThis.WordLevel?.BANDS?.[packId]?.known) || freq.length;
+    next[packId] = { n: Math.min(known, freq.length), at };
+  }
+  wordPacksHave = next;
+  await chrome.storage.local.set({ vb_wordfreq: freq, vb_wordpacks: next });
+  return next;
+}
+
+function packKnownSet(level) {
+  const n = Number(level?.known) || 0;
+  return globalThis.WordLevel?.knownFromFreq(wordFreqList, n) || new Set();
+}
+
+function wordPackBoxHtml() {
+  const ids = wordPackIds();
+  const ready = wordFreqList.length > 1000;
+  return `
+    <p class="wordpack-kicker">${t("词汇包")}</p>
+    <p class="setup-lead">${t("下载到本机后，按这个水平筛生词不再调用 AI。按常用度切一刀，不是官方考纲。")}</p>
+    <div class="wordpack-list">
+      ${ids
+        .map((packId) => {
+          const meta = globalThis.WordLevel?.BANDS?.[packId] || { label: packId, known: 0 };
+          const have = Boolean(wordPacksHave[packId] || ready);
+          const n = wordPacksHave[packId]?.n || meta.known;
+          return `<div class="wordpack-row">
+            <div>
+              <b>${t(meta.label)}</b>
+              <span>${have ? t("已下载 · {n} 词", { n }) : t("约 {n} 词", { n: meta.known })}</span>
+            </div>
+            <button type="button" class="btn${have ? "" : " btn-primary"}" data-pack="${packId}" ${have ? "disabled" : ""}>${have ? t("已在本机") : t("下载")}</button>
+          </div>`;
+        })
+        .join("")}
+    </div>
+    <div class="row-actions">
+      <button type="button" class="text-btn" data-pack-all>${ready ? t("词表已在本机") : t("一次装齐")}</button>
+    </div>
+  `;
+}
+
+function bindWordPackBox(root) {
+  if (!root) return;
+  root.innerHTML = wordPackBoxHtml();
+  const run = async (id, all) => {
+    try {
+      await installWordPack(id, { all });
+      paintWordPackBoxes();
+      flashHint(all ? t("词表已装到本机。筛生词不再花 token。") : t("已下载「{name}」词包", { name: t(globalThis.WordLevel?.BANDS?.[id]?.label || id) }));
+      checkAchievementsSoon("pack");
+      const level = resolveVocabLevel();
+      if (level.id !== "off" && state.segments.length) scanVideoVocab({ force: true });
+    } catch (error) {
+      flashHint(friendlyAiError(error.message, t("词汇包还没准备好。")));
+    }
+  };
+  root.querySelectorAll("[data-pack]").forEach((btn) => {
+    btn.addEventListener("click", () => run(btn.dataset.pack, false));
+  });
+  root.querySelector("[data-pack-all]")?.addEventListener("click", () => {
+    if (wordFreqList.length > 1000) return;
+    run("ielts", true);
+  });
+}
+
+function paintWordPackBoxes() {
+  ["popWordPacks", "setWordPacks"].forEach((id) => {
+    const el = $(id);
+    if (el) bindWordPackBox(el);
+  });
+}
+
 function paintVocabBand(prefix, band) {
   const box = $(`${prefix}VocabBand`);
   const wrap = $(`${prefix}VocabScoreWrap`);
@@ -1434,6 +1661,7 @@ function keysTableHtml() {
       <tr><td>A</td><td>Again · ${t("再听这句或划过的几句。再按一次，或按 Esc 停")}</td></tr>
       <tr><td>N</td><td>Note · ${t("在这一刻写下自己的话")}</td></tr>
       <tr><td>B</td><td>Bookmark · ${t("夹在这一秒，事后可写一句")}</td></tr>
+      <tr><td>C</td><td>${t("片上字幕条。打开后画面下方多一条可点的字幕")}</td></tr>
     </table>
     <p class="setup-lead">${t("书签会钉在视频自己的进度条上。事后可补一句。N 只在侧栏里按，避免抢掉 YouTube 的下一集。")}</p>`
 }
@@ -1448,10 +1676,12 @@ function setVocabPop(open) {
   pop.hidden = !open;
   if (open) {
     if ($("moreMenu")) $("moreMenu").hidden = true;
+    setAchievePop(false);
     closeSettings();
     bindVocabBandUI("pop", () => applyVocabPick("pop"));
     bindVocabTestBtn("popVocabTest");
     paintVocabChrome();
+    paintWordPackBoxes();
   }
 }
 
@@ -1563,7 +1793,9 @@ function paintVocabChrome() {
     hint.textContent =
       level.id === "off"
         ? t("点一下就保存。也可以测 20 个词，估一个更准的量。不是官方考纲。")
-        : `现在按「${level.label}」筛。打开视频会先给生词库。`;
+        : wordPackReady(level.id)
+          ? t("现在按「{name}」筛。这篇走本地词包，不花 token。", { name: level.label })
+          : t("现在按「{name}」筛。下载词包后就不走 AI。", { name: level.label });
   }
   ["setup", "set", "pop", "state", "preview"].forEach((prefix) => {
     if (!$(`${prefix}VocabBand`)) return;
@@ -1713,6 +1945,7 @@ async function loadLists() {
     "vb_lib",
     "vb_buddies",
     "vb_group",
+    "vb_achieve",
   ]);
   highlights = stored.vb_highlights || [];
   notes = stored.vb_notes || [];
@@ -1725,10 +1958,209 @@ async function loadLists() {
   lib = stored.vb_lib || {};
   buddies = stored.vb_buddies || [];
   groupSnap = stored.vb_group || null;
+  achieveStore = { ...emptyAchieve(), ...(stored.vb_achieve || {}) };
+  achieveStore.unlocked = achieveStore.unlocked || {};
+  achieveStore.seen = achieveStore.seen || {};
+  achieveStore.flags = achieveStore.flags || {};
+  achieveStore.doneKeys = achieveStore.doneKeys || {};
+  achieveStore.days = Array.isArray(achieveStore.days) ? achieveStore.days : [];
 }
 
 async function saveList(key, value) {
   await chrome.storage.local.set({ [key]: value });
+}
+
+let achieveStore = emptyAchieve();
+let achieveTimer = 0;
+
+function emptyAchieve() {
+  return globalThis.Achieve?.emptyStore?.() || { unlocked: {}, seen: {}, flags: {}, days: [], doneKeys: {}, doneChapters: 0 };
+}
+
+function videoSiteKind(id) {
+  const s = String(id || "");
+  if (/^BV/i.test(s) || /^av\d+/i.test(s) || /:p\d+$/i.test(s)) return "bili";
+  if (s) return "yt";
+  return "";
+}
+
+function rememberCurrentDone() {
+  const vid = state.videoId;
+  if (!vid || !state.blocks?.length) return false;
+  achieveStore.doneKeys = achieveStore.doneKeys || {};
+  let added = false;
+  state.blocks.forEach((_, i) => {
+    if (blockProgress(i) !== "done") return;
+    const key = `${vid}:${i}`;
+    if (achieveStore.doneKeys[key]) return;
+    achieveStore.doneKeys[key] = 1;
+    added = true;
+  });
+  if (added) achieveStore.doneChapters = Object.keys(achieveStore.doneKeys).length;
+  return added;
+}
+
+function collectAchieveStats() {
+  const flags = achieveStore.flags || {};
+  const touched = globalThis.Achieve?.touchDays?.(achieveStore.days) || { days: achieveStore.days || [], streak: 0 };
+  let chapters = 0;
+  for (const [id, rec] of Object.entries(lib || {})) {
+    if (id === state.videoId) continue;
+    chapters += rec?.bricks?.length || 0;
+  }
+  chapters += state.blocks?.length || 0;
+  const doneNow = (state.blocks || []).filter((_, i) => blockProgress(i) === "done").length;
+  const youtube = (shelf || []).filter((x) => videoSiteKind(x.videoId) === "yt").length;
+  const bili = (shelf || []).filter((x) => videoSiteKind(x.videoId) === "bili").length;
+  return {
+    videos: (shelf || []).length,
+    words: (vocab || []).length,
+    highlights: (highlights || []).length,
+    notes: (notes || []).length,
+    marks: (marks || []).length,
+    quotes: (quotes || []).length,
+    chapters,
+    doneChapters: Math.max(
+      Number(achieveStore.doneChapters) || 0,
+      Object.keys(achieveStore.doneKeys || {}).length,
+      doneNow,
+    ),
+    reviews: (cards || []).filter((c) => Number(c.reps) > 0).length,
+    packs: wordFreqList.length > 1000 || Object.keys(wordPacksHave || {}).length ? 1 : 0,
+    youtube,
+    bili,
+    asks: Number(flags.ask || 0) + ((state.chat || []).some((m) => m?.role === "user") ? 1 : 0),
+    maps: Boolean(flags.map || state.conceptMap || (atlas?.concepts || []).length),
+    live: Boolean(flags.live || settingsCache.liveCc),
+    loop: Boolean(flags.loop),
+    shadow: Boolean(flags.shadow),
+    exported: Boolean(flags.export),
+    streak: touched.streak,
+    days: (touched.days || []).length,
+  };
+}
+
+function paintAchieveBadge() {
+  const n = globalThis.Achieve?.unseen?.(achieveStore) || 0;
+  const badge = $("achieveTopBadge");
+  const btn = $("achieveTopBtn");
+  if (badge) {
+    badge.hidden = n === 0;
+    badge.textContent = n > 99 ? "99+" : String(n);
+  }
+  btn?.classList.toggle("pulse", n > 0);
+}
+
+function setAchievePop(open) {
+  const pop = $("achievePop");
+  if (!pop) return;
+  if (open) {
+    $("moreMenu") && ($("moreMenu").hidden = true);
+    setVocabPop(false);
+    if ($("themePop")) $("themePop").hidden = true;
+    closeSettings();
+    renderAchievePop();
+    pop.hidden = false;
+  } else if (!pop.hidden) {
+    pop.hidden = true;
+    markAchieveSeen().catch(() => {});
+  }
+}
+
+function renderAchievePop() {
+  const pop = $("achievePop");
+  const api = globalThis.Achieve;
+  if (!pop || !api) return;
+  const stats = collectAchieveStats();
+  const unlocked = achieveStore.unlocked || {};
+  const total = api.DEFS.length;
+  const got = api.DEFS.filter((d) => unlocked[d.id]).length;
+  const groups = api.GROUPS.map((g) => {
+    const rows = api.DEFS.filter((d) => d.group === g.id)
+      .map((d) => {
+        const on = Boolean(unlocked[d.id]);
+        const fresh = on && !achieveStore.seen?.[d.id];
+        const have = typeof d.have === "function" ? Number(d.have(stats) || 0) : 0;
+        const need = Number(d.need) || 0;
+        const bar =
+          need && !on
+            ? `<span class="achieve-bar">${Math.min(have, need)} / ${need}</span>`
+            : "";
+        return `<article class="achieve-card${on ? " on" : ""}">
+          <div>
+            <b>${t(d.title)}${fresh ? `<span class="achieve-new">${t("新")}</span>` : ""}</b>
+            <p>${t(d.blurb)}</p>
+          </div>
+          ${bar || (on ? `<span class="achieve-on">${t("已得到")}</span>` : `<span class="achieve-wait">${t("还在路上")}</span>`)}
+        </article>`;
+      })
+      .join("");
+    return `<section class="achieve-group"><h3>${t(g.label)}</h3>${rows}</section>`;
+  }).join("");
+  pop.innerHTML = `
+    <div class="achieve-head">
+      <div>
+        <p class="achieve-kicker">${t("成就")}</p>
+        <p class="setup-lead">${t("看过的、记下的、拆过的，都会记在这里。不是分数，是你改过的痕迹。")}</p>
+      </div>
+      <strong>${got} / ${total}</strong>
+    </div>
+    ${groups}
+  `;
+}
+
+async function persistAchieve() {
+  await chrome.storage.local.set({ vb_achieve: achieveStore });
+}
+
+async function checkAchievements({ silent = false } = {}) {
+  const api = globalThis.Achieve;
+  if (!api) return [];
+  const prevDays = achieveStore.days || [];
+  const touched = api.touchDays(prevDays);
+  const daysChanged =
+    touched.days.length !== prevDays.length || touched.days.join("\0") !== prevDays.join("\0");
+  achieveStore.days = touched.days;
+  const doneChanged = rememberCurrentDone();
+  const stats = collectAchieveStats();
+  const result = api.evaluate(stats, achieveStore);
+  const fresh = result.fresh || [];
+  achieveStore.unlocked = result.unlocked;
+  if (fresh.length || daysChanged || doneChanged) await persistAchieve();
+  paintAchieveBadge();
+  if ($("achievePop") && !$("achievePop").hidden) renderAchievePop();
+  if (!silent && fresh.length) {
+    const first = api.byId(fresh[0]);
+    const text =
+      fresh.length === 1
+        ? t("成就：{name}", { name: t(first?.title || "改善") })
+        : t("一下子解锁了 {n} 个成就", { n: fresh.length });
+    flashHint(text, {
+      extra: {
+        label: t("看看"),
+        run: () => setAchievePop(true),
+      },
+    });
+  }
+  return fresh;
+}
+
+function checkAchievementsSoon(flag) {
+  if (flag) achieveStore.flags[flag] = true;
+  clearTimeout(achieveTimer);
+  achieveTimer = setTimeout(() => {
+    checkAchievements().catch(() => {});
+  }, 240);
+}
+
+async function markAchieveSeen() {
+  const unlocked = achieveStore.unlocked || {};
+  achieveStore.seen = { ...unlocked };
+  Object.keys(unlocked).forEach((id) => {
+    achieveStore.seen[id] = true;
+  });
+  await persistAchieve();
+  paintAchieveBadge();
 }
 
 function normLabel(text) {
@@ -2199,6 +2631,14 @@ function bindVisualHits(root, i) {
 function openVideoAt(videoId, seconds) {
   const url = watchUrl(videoId, seconds);
   if (!url) return;
+  pendingSeek = { videoId, seconds: Number(seconds) || 0 };
+  takeIncomingWatch({
+    videoId,
+    url,
+    tabId: state.tabId,
+    force: true,
+    source: "user",
+  });
   if (state.tabId) chrome.tabs.update(state.tabId, { url });
   else chrome.tabs.create({ url });
 }
@@ -2229,6 +2669,7 @@ async function upsertShelf(partial) {
   await saveList("vb_shelf", shelf);
   scheduleKoulingPush();
   renderShelf();
+  checkAchievementsSoon();
 }
 
 function bindLibJumps(root) {
@@ -3097,6 +3538,7 @@ async function saveCache() {
     graphLayout,
     resumeHint: state.resumeHint || null,
     quoteExtracted: Boolean(state.quoteExtracted),
+    blocksLang: currentLang(),
     levelScan: state.levelScan || null,
     vocabPreviewDone: Boolean(state.vocabPreviewDone),
     vocabPreviewKey: state.vocabPreviewDone ? `${state.videoId}:${resolveVocabLevel().key}` : "",
@@ -3227,6 +3669,7 @@ function closeSettings() {
 function openSettings(opts = {}) {
   $("moreMenu") && ($("moreMenu").hidden = true);
   setVocabPop(false);
+  setAchievePop(false);
   if ($("themePop")) $("themePop").hidden = true;
   const page = $("settingsDrawer");
   if (!page) return;
@@ -3279,6 +3722,17 @@ async function changeUiLang(lang) {
     return;
   }
   await saveSettings({ uiLang: next });
+  if (state.blocks.length) {
+    const sample = `${state.blocks[0].title || ""} ${state.blocks[0].summary || ""}`;
+    const staleEn = next.startsWith("zh") && !/[\u4e00-\u9fff]/.test(sample) && /[A-Za-z]{4,}/.test(sample);
+    if (staleEn) {
+      state.blocks = [];
+      state.gist = "";
+      state.dives = {};
+      state.study = null;
+      saveCacheSoon(200);
+    }
+  }
   refreshI18nChrome();
 }
 
@@ -3292,6 +3746,7 @@ function refreshI18nChrome() {
   paintVocabBand("state", settingsCache.vocabBand || "off");
   if (!$("tutorial")?.hidden) renderTutorial();
   if (!$("settingsDrawer")?.hidden) fillSettingsDrawer();
+  if ($("achievePop") && !$("achievePop").hidden) renderAchievePop();
   updateLoopBtn();
   paintRateControls();
   if (!$("mainBox")?.hidden) {
@@ -3406,6 +3861,26 @@ function fillSettingsDrawer() {
       <input type="text" id="setVocabScore" inputmode="decimal" placeholder="${t("例如 6.5")}" />
     </label>
     <button id="setVocabTest" class="text-btn" type="button">${t("测一下词汇量")}</button>
+    <div id="setWordPacks" class="wordpack-box"></div>
+    <label class="field check"><span><input type="checkbox" id="setCaptionsOnly" ${captionsOnlyMode() ? "checked" : ""} /> ${t("只要字幕")}</span></label>
+    <p class="setup-lead">${t("打开后不自动拆页或做学习包。双语仍会开着，点「原文」才不译。")}</p>
+    <label class="field check switch"><span><input type="checkbox" id="setLiveCc" ${settingsCache.liveCc ? "checked" : ""} /> ${t("片上字幕条")}</span></label>
+    <p class="setup-lead">${t("打开后，系统字幕会淡出，改由画面按播放头跟上这一句。点词可查可存，点「跳这句」会跟侧栏对齐。")}</p>
+    <div class="field" id="setLiveStyle">
+      <span>${t("片上字幕样式")}</span>
+      <div class="live-style-row">
+        <button type="button" class="icon-btn" id="setLiveSmaller" title="${t("字号减小")}">A−</button>
+        <span id="setLiveSizeLabel">${liveCcSizeOf(settingsCache.liveCcSize)}</span>
+        <button type="button" class="icon-btn" id="setLiveBigger" title="${t("字号增大")}">A+</button>
+        <div class="seg-toggle" id="setLiveFont">
+          <button type="button" class="seg-btn" data-font="sans">${t("无衬线")}</button>
+          <button type="button" class="seg-btn" data-font="serif">${t("衬线")}</button>
+          <button type="button" class="seg-btn" data-font="round">${t("圆体")}</button>
+          <button type="button" class="seg-btn" data-font="mono">${t("等宽")}</button>
+        </div>
+        <button type="button" class="btn" id="setCopyTranscript">${t("复制全文")}</button>
+      </div>
+    </div>
     <div class="drawer-actions" style="margin-top:8px">
       <button id="settingsSave" class="btn btn-primary" type="button">${t("保存")}</button>
       <span id="settingsSaved" hidden style="color:#3aa06a;margin-left:8px">${t("已保存")}</span>
@@ -3429,6 +3904,10 @@ function fillSettingsDrawer() {
       <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">申请 DeepSeek</a>
       ·
       <a href="https://dash.supadata.ai/auth/sign-up" target="_blank" rel="noreferrer">申请 Supadata</a>
+      ·
+      <a href="https://github.com/CharlieLam2025/Kaizen/blob/main/PRIVACY.md" target="_blank" rel="noreferrer">${t("隐私说明")}</a>
+      ·
+      <a href="https://github.com/CharlieLam2025/Kaizen/issues" target="_blank" rel="noreferrer">Issues</a>
     </p>
     ${authorBlockHtml("card")}
   `;
@@ -3465,8 +3944,40 @@ function fillSettingsDrawer() {
     });
   });
   $("setVocabTest")?.addEventListener("click", () => openVocabTest());
+  paintWordPackBoxes();
+  $("setLiveCc")?.addEventListener("change", async () => {
+    await saveSettings({ liveCc: Boolean($("setLiveCc").checked) });
+    flashHint($("setLiveCc").checked ? t("片上字幕条已打开") : t("片上字幕条已关掉"));
+    if ($("setLiveCc").checked) checkAchievementsSoon("live");
+  });
+  paintLiveStyleSettings();
+  $("setLiveSmaller")?.addEventListener("click", async () => {
+    const next = liveCcSizeOf((Number(settingsCache.liveCcSize) || 16) - 1);
+    if (next === liveCcSizeOf(settingsCache.liveCcSize)) {
+      flashHint(t("已经最小。"));
+      return;
+    }
+    await saveSettings({ liveCcSize: next });
+    paintLiveStyleSettings();
+  });
+  $("setLiveBigger")?.addEventListener("click", async () => {
+    const next = liveCcSizeOf((Number(settingsCache.liveCcSize) || 16) + 1);
+    if (next === liveCcSizeOf(settingsCache.liveCcSize)) {
+      flashHint(t("已经最大。"));
+      return;
+    }
+    await saveSettings({ liveCcSize: next });
+    paintLiveStyleSettings();
+  });
+  $("setLiveFont")?.querySelectorAll("[data-font]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await saveSettings({ liveCcFont: liveCcFontOf(btn.dataset.font) });
+      paintLiveStyleSettings();
+    });
+  });
+  $("setCopyTranscript")?.addEventListener("click", () => copyAllTranscript());
   $("settingsSave").addEventListener("click", async () => {
-    await saveSettings({
+    const next = {
       apiKey: $("setKey").value.trim(),
       supadataKey: $("setSupadata").value.trim(),
       baseUrl: $("setBase").value.trim() || "https://api.deepseek.com/v1",
@@ -3474,9 +3985,13 @@ function fillSettingsDrawer() {
       diveModel: $("setDiveModel").value || "deepseek-v4-pro",
       uiLang: currentLang(),
       uiTheme: settingsCache.uiTheme || "paper",
+      captionsOnly: Boolean($("setCaptionsOnly")?.checked),
+      liveCcSize: liveCcSizeOf(settingsCache.liveCcSize),
+      liveCcFont: liveCcFontOf(settingsCache.liveCcFont),
       ...readVocabSettings("set"),
       koulingUrl: $("setKoulingUrl")?.value.trim() || "",
-    });
+    };
+    await saveSettings(next);
     state.levelScan = null;
     state.vocabPreviewDone = false;
     vocabCardIndex = 0;
@@ -3489,8 +4004,22 @@ function fillSettingsDrawer() {
       if ($("setupLead")) $("setupLead").textContent = t("先填 DeepSeek Key。字幕优先用视频自己的。");
       return;
     }
+    const ping = await sendToBg({
+      action: "vbPingKeys",
+      apiKey: next.apiKey,
+      supadataKey: next.supadataKey,
+      baseUrl: next.baseUrl,
+    }).catch(() => null);
+    const bits = [];
+    if (ping?.deepseek && !ping.deepseek.ok) bits.push(t("DeepSeek Key 连不上") + (ping.deepseek.error ? `：${ping.deepseek.error}` : ""));
+    if (ping?.supadata && !ping.supadata.ok && !ping.supadata.skipped) {
+      bits.push(t("Supadata Key 连不上") + (ping.supadata.error ? `：${ping.supadata.error}` : ""));
+    }
     $("settingsSaved").hidden = false;
-    setTimeout(() => ($("settingsSaved").hidden = true), 1200);
+    $("settingsSaved").textContent = bits.length ? bits.join(" · ") : t("已保存");
+    $("settingsSaved").style.color = bits.length ? "#b42318" : "#3aa06a";
+    flashHint(bits.length ? bits.join(" · ") : t("设置已保存"));
+    setTimeout(() => ($("settingsSaved").hidden = true), 2400);
   });
   $("backupExport")?.addEventListener("click", exportAllData);
   $("backupImport")?.addEventListener("click", () => $("backupFile")?.click());
@@ -3620,7 +4149,14 @@ function friendlyAiError(raw, fallback) {
 }
 
 function friendlyTranscriptError(raw) {
-  return friendlyAiError(raw, t("点重试，或换一支有字幕的视频。"));
+  const e = String(raw || "").trim();
+  if (/429|limit[- ]?exceeded|额度用完|quota/i.test(e)) return t("字幕额度用完了");
+  if (/401|Key 无效|invalid api|unauthorized/i.test(e)) return t("字幕 Key 无效，去设置里看一下。");
+  if (/206|没有原生字幕|没有可用字幕|无字幕轨|字幕是空/i.test(e)) return t("这支视频没有可用字幕。");
+  if (/超时|timeout/i.test(e)) return t("打开字幕超时了，点重试。");
+  if (/412|拒绝了这次访问/i.test(e)) return t("B 站拒绝了这次访问，稍后重试");
+  if (/登录/.test(e)) return t("B 站字幕要先登录。打开这支视频确认能出字幕，再点重试。");
+  return friendlyAiError(raw, t("暂时读不到字幕。点重试。"));
 }
 
 function looksLikeFailedZh(text) {
@@ -3860,13 +4396,13 @@ function exportQuotesMarkdown() {
 }
 
 function transcriptPlainText() {
-  const mode = state.transcriptMode || "original";
+  const mode = state.transcriptMode || preferredTranscriptMode();
   const lines = [];
   const title = String(state.title || "").trim();
   if (title) lines.push(title, "");
   for (const [i, seg] of state.segments.entries()) {
     const raw = String(seg.text || "").trim();
-    const zh = String(state.translations[i] || "").trim();
+    const zh = translationAt(i);
     const time = clock(seg.start);
     if (mode === "zh") {
       if (zh || raw) lines.push(`${time}  ${zh || raw}`);
@@ -3945,7 +4481,8 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
     selectedBlock: -1,
     dives: cached?.dives || {},
     scripts: cached?.scripts || {},
-    translations: cached?.translations || {},
+    translations: { ...(src.translations || {}), ...(cached?.translations || {}) },
+    transcriptMode: preferredTranscriptMode(),
     chat: cached?.chat || [],
     askContext: null,
     study: cached?.study || null,
@@ -3982,7 +4519,8 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
   Object.keys(state.translations || {}).forEach((k) => {
     const raw = state.translations[k];
     const cleaned = cleanZh(raw);
-    if (looksLikeFailedZh(cleaned)) {
+    const src = state.segments[Number(k)]?.text;
+    if (!isRealTranslation(cleaned, src)) {
       delete state.translations[k];
       zhDirty = true;
       return;
@@ -3992,6 +4530,20 @@ function hydrateVideoState(videoId, tabTitle, src, cached) {
       zhDirty = true;
     }
   });
+  const uiLang = currentLang();
+  const sample = `${cached?.blocks?.[0]?.title || ""} ${cached?.blocks?.[0]?.summary || ""}`;
+  const staleEn =
+    uiLang.startsWith("zh") &&
+    cached?.blocks?.length &&
+    !/[\u4e00-\u9fff]/.test(sample) &&
+    /[A-Za-z]{4,}/.test(sample);
+  if ((cached?.blocksLang && cached.blocksLang !== uiLang) || (!cached?.blocksLang && staleEn)) {
+    state.blocks = [];
+    state.gist = "";
+    state.dives = {};
+    state.study = null;
+    state.resumeHint = null;
+  }
   if (zhDirty) saveCacheSoon(400);
   if (state.quoteExtracted && !quotes.some((q) => q.videoId === videoId)) {
     state.quoteExtracted = false;
@@ -4026,18 +4578,21 @@ function paintOpenedVideo() {
   });
   paintView(currentView());
   if (state.tabId) ensureContentScript(state.tabId).catch(() => {});
-  if (state.lastSeconds >= 20 && !state.resumeHint?.where && !state.resumeHint?.error) loadResumeHint();
+  if (pendingSeek?.videoId === videoId && Number.isFinite(Number(pendingSeek.seconds))) {
+    state.lastSeconds = Number(pendingSeek.seconds);
+    seek(state.lastSeconds);
+    pendingSeek = null;
+  }
+  if (state.lastSeconds >= 20 && !state.resumeHint?.where && !state.resumeHint?.error && !captionsOnlyMode()) {
+    loadResumeHint();
+  }
   const needZh =
-    state.transcriptMode !== "original" && state.segments.some((_, i) => !state.translations[i]);
+    state.transcriptMode !== "original" &&
+    state.segments.some((_, i) => !translationAt(i));
   if (needZh) translateAll();
   renderTranslateBar();
   applyPlayRate(playbackRate, false);
   queueBackgroundWork(videoId);
-  if (resolveVocabLevel().id !== "off" && !state.levelScan?.scanned) {
-    setTimeout(() => {
-      if (state.videoId === videoId) scanVideoVocab();
-    }, 1600);
-  }
   flushPendingHotkey();
 }
 
@@ -4049,6 +4604,8 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     return;
   }
   if (!force && loadingVideoId === videoId) return;
+  videoJob += 1;
+  const job = videoJob;
   loadingVideoId = videoId;
   clearQueuedWork();
 
@@ -4060,7 +4617,6 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     const live = liveStore.vb_live?.videoId === videoId ? liveStore.vb_live : null;
     const segs = live?.segments?.length ? live.segments : cached?.segments;
     if (segs?.length) {
-      await stashLearningBricks();
       hydrateVideoState(
         videoId,
         tabTitle,
@@ -4080,9 +4636,9 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     markWatchStage("captions", { videoId, tabId: state.tabId });
     const result = await Promise.race([
       sendToBg({ action: "vbSupadata", videoId }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("打开字幕超时了")), 28000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("打开字幕超时了")), 20000)),
     ]);
-    if (loadingVideoId !== videoId) return;
+    if (job !== videoJob || loadingVideoId !== videoId) return;
     if (!result?.ok) {
       transcriptFailId = videoId;
       transcriptFailAt = Date.now();
@@ -4092,19 +4648,18 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     }
     transcriptFailId = "";
     transcriptFailAt = 0;
-    await stashLearningBricks();
     hydrateVideoState(videoId, tabTitle, result, cached);
     paintOpenedVideo();
     markWatchStage("opened", { videoId, tabId: state.tabId });
     saveCache();
   } catch (error) {
-    if (loadingVideoId !== videoId) return;
+    if (job !== videoJob || loadingVideoId !== videoId) return;
     transcriptFailId = videoId;
     transcriptFailAt = Date.now();
     markWatchStage("caption-error", { videoId, error: String(error?.message || error).slice(0, 240) });
     showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(error?.message || error), true);
   } finally {
-    if (loadingVideoId === videoId) loadingVideoId = null;
+    if (job === videoJob && loadingVideoId === videoId) loadingVideoId = null;
   }
 }
 
@@ -4395,6 +4950,7 @@ async function dropMark(opts = {}) {
   await saveList("vb_marks", marks);
   afterMarkChange();
   hintMarkDropped(mark);
+  checkAchievementsSoon();
   return mark;
 }
 
@@ -4756,6 +5312,7 @@ async function analyzeBlocks() {
   if (isAnalyzing || !state.segments.length) return;
   isAnalyzing = true;
   const videoId = state.videoId;
+  const job = videoJob;
   setBrickStatus(t("正在拆成知识块…"));
   try {
     const result = await sendToBg({
@@ -4763,11 +5320,13 @@ async function analyzeBlocks() {
       segments: state.segments,
       title: state.title,
       durationSeconds: state.segments.at(-1)?.end || 0,
+      uiLang: currentLang(),
     });
-    if (state.videoId !== videoId) return;
+    if (job !== videoJob || state.videoId !== videoId) return;
     if (!result?.ok) throw new Error(result?.error || t("拆块失败"));
     state.gist = result.gist;
     state.blocks = result.blocks;
+    checkAchievementsSoon();
     renderBrickBar();
     renderBrickList();
     renderResume();
@@ -4787,6 +5346,10 @@ function clearQueuedWork() {
 
 function queueBackgroundWork(videoId) {
   clearQueuedWork();
+  if (captionsOnlyMode()) {
+    if (!state.blocks.length) setBrickStatus(t("点「拆」才拆页，不会一打开就花额度。"));
+    return;
+  }
   if (!state.blocks.length) {
     setBrickStatus(t("结构在后台切…"));
     heavyWorkTimer = setTimeout(() => {
@@ -4873,6 +5436,7 @@ async function loadStudyPack({ force = false } = {}) {
   if (state.study && !force) return;
   isStudying = true;
   const videoId = state.videoId;
+  const job = videoJob;
   $("studyBox").innerHTML = `<div class="study-label">学习包</div><p style="color:var(--muted)">正在提炼提纲和问题…</p>`;
   try {
     const result = await sendToBg({
@@ -4887,7 +5451,7 @@ async function loadStudyPack({ force = false } = {}) {
         category: b.category,
       })),
     });
-    if (state.videoId !== videoId) return;
+    if (job !== videoJob || state.videoId !== videoId) return;
     if (!result?.ok) throw new Error(result?.error || t("学习包失败"));
     state.study = {
       spine: result.spine || "",
@@ -4964,7 +5528,16 @@ function setProgress(i, status, persist = true) {
   if (!state.blocks[i] || state.progress[i] === status) return;
   if (status === "learning" && state.progress[i] === "done") return;
   state.progress[i] = status;
-  if (status === "done") dropBrickCard(i);
+  if (status === "done") {
+    dropBrickCard(i);
+    const key = state.videoId ? `${state.videoId}:${i}` : "";
+    achieveStore.doneKeys = achieveStore.doneKeys || {};
+    if (key && !achieveStore.doneKeys[key]) {
+      achieveStore.doneKeys[key] = 1;
+      achieveStore.doneChapters = Object.keys(achieveStore.doneKeys).length;
+    }
+    checkAchievementsSoon();
+  }
   renderProgressMeter();
   const view = currentView();
   if (view === "bricks") {
@@ -5156,6 +5729,7 @@ async function loadConceptMap() {
     };
     await mergeAtlasLocal(state.conceptMap);
     saveCache();
+    checkAchievementsSoon("map");
     renderMaps();
     echoMarksCache = null;
     echoMarksKey = "";
@@ -6323,8 +6897,8 @@ function renderBrickList() {
   root.innerHTML = "";
   if (!state.blocks.length) {
     root.innerHTML = `<div class="chat-empty">${
-      isAnalyzing ? "结构在后台切，出来后可以一块一块看。" : "知识块出来后，可以逐块拆解，或闭卷讲一遍做费曼检验。"
-    }${isAnalyzing ? "" : `<div class="row-actions"><button class="btn" type="button" id="brickRetry">再拆一次</button></div>`}</div>`;
+      isAnalyzing ? t("正在拆成知识块…") : t("点「拆」才拆页。拆完可以一块一块看，或闭卷讲一遍。")
+    }${isAnalyzing ? "" : `<div class="row-actions"><button class="btn" type="button" id="brickRetry">${t("拆")}</button></div>`}</div>`;
     $("brickRetry")?.addEventListener("click", () => analyzeBlocks());
     return;
   }
@@ -6813,6 +7387,7 @@ async function startSpanLoop(span, opts = {}) {
     return false;
   }
   scrollToSeconds(span.start);
+  checkAchievementsSoon(state.shadowing ? "shadow" : "loop");
   return true;
 }
 
@@ -6961,6 +7536,7 @@ async function toggleLoop(i) {
     } else {
       scrollToSeconds(block.start);
       setProgress(i, "learning");
+      scheduleBrick(i);
     }
     updateLoopBtn();
   }
@@ -7705,6 +8281,7 @@ async function deepDive(i) {
     const { ok, error, code, ...dive } = result;
     state.dives[i] = dive;
     setProgress(i, "learning");
+    scheduleBrick(i);
     saveCache();
     renderBrickList();
     renderMaps();
@@ -7848,22 +8425,37 @@ function openWordFromEl(el, row) {
   openWordCard(word, {
     sentence: seg?.text || "",
     seconds: Number(row?.dataset.start) || 0,
+    videoId: state.videoId,
+    videoTitle: state.title,
   });
+}
+
+function decorateTextNodes(html, fn) {
+  const box = document.createElement("div");
+  box.innerHTML = html;
+  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walk.nextNode()) nodes.push(walk.currentNode);
+  for (const node of nodes) {
+    if (!node.nodeValue || node.parentElement?.closest("mark, .vocab-hit, .w-hit")) continue;
+    const next = fn(node.nodeValue);
+    if (next == null || next === node.nodeValue) continue;
+    const wrap = document.createElement("span");
+    wrap.innerHTML = next;
+    node.replaceWith(...wrap.childNodes);
+  }
+  return box.innerHTML;
 }
 
 function markLevelWords(html) {
   const { level } = getDecorateCache();
   if (!level.size) return html;
-  return html
-    .split(/(<[^>]+>)/)
-    .map((chunk) => {
-      if (!chunk || chunk.startsWith("<")) return chunk;
-      return chunk.replace(/\b([A-Za-z][A-Za-z'-]{1,39})\b/g, (word) => {
-        if (!level.has(word.toLowerCase())) return word;
-        return `<span class="w-hit level-hit" data-word="${word.replace(/"/g, "")}" role="button">${word}</span>`;
-      });
-    })
-    .join("");
+  return decorateTextNodes(html, (text) =>
+    text.replace(/\b([A-Za-z][A-Za-z'-]{1,39})\b/g, (word) => {
+      if (!level.has(word.toLowerCase())) return word;
+      return `<span class="w-hit level-hit" data-word="${word.replace(/"/g, "")}" role="button">${word}</span>`;
+    }),
+  );
 }
 
 function decorateText(text) {
@@ -7886,13 +8478,9 @@ function decorateText(text) {
   }
   html += esc(plain.slice(cursor));
   if (cache.termPattern) {
-    html = html
-      .split(/(<[^>]+>)/)
-      .map((chunk) => {
-        if (!chunk || chunk.startsWith("<")) return chunk;
-        return chunk.replace(cache.termPattern, (m) => `<span class="vocab-hit" data-vocab="${m.toLowerCase()}">${m}</span>`);
-      })
-      .join("");
+    html = decorateTextNodes(html, (text) =>
+      text.replace(cache.termPattern, (m) => `<span class="vocab-hit" data-vocab="${m.toLowerCase()}">${m}</span>`),
+    );
   }
   return html;
 }
@@ -7942,9 +8530,16 @@ function buildTranscriptRow(i, { mode, echoes, golds }) {
 function zhSlotHtml(i, zh = translationAt(i)) {
   if (zh) return `<div class="t-zh">${decorateText(zh)}</div>`;
   if (state.translateFailed?.[i]) {
-    return `<div class="t-zh failed">这句没翻出来 <button class="text-btn t-retry" type="button" data-retryzh="${i}">重试</button></div>`;
+    return `<div class="t-zh failed">${t("这句没翻出来")} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
   }
-  return `<div class="t-zh pending"><span class="zh-skel" aria-hidden="true"></span></div>`;
+  if (isTranslating) {
+    return `<div class="t-zh pending"><span class="zh-skel" aria-hidden="true"></span></div>`;
+  }
+  if (state.transcriptMode === "zh") {
+    const src = state.segments[i]?.text || "";
+    return `<div class="t-zh skipped">${decorateText(src)} · <button class="text-btn t-retry" type="button" data-retryzh="${i}">${t("重试")}</button></div>`;
+  }
+  return "";
 }
 
 function patchRowTranslation(i) {
@@ -8115,9 +8710,10 @@ async function translateAll() {
   isTranslating = true;
   if (!state.translateFailed) state.translateFailed = {};
   const videoId = state.videoId;
+  const job = videoJob;
   renderTranslateBar();
   try {
-    while (state.videoId === videoId && state.transcriptMode !== "original") {
+    while (job === videoJob && state.videoId === videoId && state.transcriptMode !== "original") {
       const pending = [];
       for (let i = 0; i < state.segments.length && pending.length < 40; i++) {
         if (!translationAt(i) && !state.translateFailed[i]) pending.push(i);
@@ -8127,7 +8723,7 @@ async function translateAll() {
         action: "vbTranslate",
         lines: pending.map((i) => state.segments[i].text),
       });
-      if (state.videoId !== videoId) break;
+      if (job !== videoJob || state.videoId !== videoId) break;
       if (!result?.ok) {
         pending.forEach((i) => {
           if (!translationAt(i)) {
@@ -8141,12 +8737,14 @@ async function translateAll() {
       }
       pending.forEach((i, k) => {
         const zh = cleanZh(result.translations[k] || "");
-        if (looksLikeFailedZh(zh) || !zh) {
-          delete state.translations[i];
-          state.translateFailed[i] = true;
-        } else {
+        const kind = translationKind(zh, state.segments[i]?.text);
+        if (kind === "ok") {
           state.translations[i] = zh;
           delete state.translateFailed[i];
+        } else {
+          delete state.translations[i];
+          if (kind === "error") state.translateFailed[i] = true;
+          else delete state.translateFailed[i];
         }
         patchRowTranslation(i);
       });
@@ -8156,7 +8754,7 @@ async function translateAll() {
     }
   } finally {
     isTranslating = false;
-    if (state.videoId === videoId) {
+    if (job === videoJob && state.videoId === videoId) {
       renderTranslateBar();
       saveCache();
     }
@@ -8164,9 +8762,11 @@ async function translateAll() {
 }
 
 function setTranscriptMode(mode) {
-  state.transcriptMode = mode;
+  const next = mode === "zh" || mode === "original" ? mode : "bilingual";
+  state.transcriptMode = next;
+  void saveSettings({ transcriptMode: next });
   renderTranscript({ force: true });
-  if (mode !== "original") translateAll();
+  if (next !== "original") translateAll();
 }
 
 function runReaderSearch() {
@@ -8407,6 +9007,7 @@ async function addHighlight(color, style) {
       flashHint(t("已撤回划线"));
     },
   });
+  checkAchievementsSoon();
 }
 
 function afterHighlightChange(idxs = []) {
@@ -8486,6 +9087,7 @@ async function saveNote() {
     createdAt: Date.now(),
   });
   await saveList("vb_notes", notes);
+  checkAchievementsSoon();
   $("noteModal").hidden = true;
   pendingNote = null;
   renderNotes();
@@ -8736,6 +9338,17 @@ async function addVocabMany(items) {
     created.push(row);
     added += 1;
   }
+  const needDef = [...created, ...linkedIds.map((id) => vocab.find((v) => v.id === id)).filter(Boolean)];
+  for (const row of needDef) {
+    if (row.definition?.senses?.[0]?.zh || row.definition?.meaning) continue;
+    const result = await sendToBg({
+      action: "vbDefine",
+      word: row.word,
+      sentence: row.sentence || "",
+      videoTitle: row.videoTitle || "",
+    }).catch(() => null);
+    if (result?.ok && result.definition) row.definition = result.definition;
+  }
   const changed = added + linked;
   if (changed) {
     if (vocab.length > 500) vocab.length = 500;
@@ -8761,6 +9374,7 @@ async function addVocabMany(items) {
   renderNotes();
   if (currentView() === "vocab") renderVocabPage();
   paintVocabChrome();
+  if (changed) checkAchievementsSoon();
   return changed;
 }
 
@@ -8850,9 +9464,18 @@ function applyVocabJump(word, target, hits, extra = {}) {
 }
 
 function jumpVocabHit(word, seconds, extra) {
+  const destId = String(extra?.entry?.videoId || extra?.videoId || "").trim();
+  if (destId && destId !== state.videoId) {
+    goToVideo(destId, seconds);
+    return;
+  }
   const hits = vocabHits(word);
   if (!hits.length) {
-    if (Number.isFinite(seconds)) {
+    if (destId && destId !== state.videoId) {
+      goToVideo(destId, seconds);
+      return;
+    }
+    if (Number.isFinite(seconds) && (!destId || destId === state.videoId)) {
       peekSeek(seconds, { word, kind: jumpKindFromExtra(extra), entry: extra?.entry });
       return;
     }
@@ -8963,7 +9586,7 @@ function renderVocabPreview() {
     return;
   }
   if (isScanningVocab) {
-    open(`<div class="vocab-preview-kicker">正在按「${esc(level.label)}」筛这篇的生词…</div>
+    open(`<div class="vocab-preview-kicker">${wordPackReady(level.id) ? t("正在按「{name}」本地筛这篇的生词…", { name: level.label }) : t("正在按「{name}」筛这篇的生词…", { name: level.label })}</div>
       <p>筛完会先给你一份生词库。想直接看字幕也可以 <button class="text-btn" type="button" id="vocabPreviewSkip">先看视频</button></p>`);
     $("vocabPreviewSkip")?.addEventListener("click", dismissVocabPreview);
     return;
@@ -9111,7 +9734,7 @@ function vocabScanHtml() {
         ? ` · ${level.label}`
         : "";
   return `<div class="vocab-scan">
-      <div class="note-meta">${t("按你的水平筛字幕里可能还不熟的词")}${esc(scoreHint)}</div>
+      <div class="note-meta">${wordPackReady(level.id) ? t("这篇用本地词包筛，不花 token") : t("按你的水平筛字幕里可能还不熟的词")}${esc(scoreHint)}</div>
       ${
         level.id === "off"
           ? `<p class="setup-lead" style="margin:0">${t("点顶栏「设词汇水平」，或在阅读页直接选四级、六级、雅思或托福。雅思/托福也可以填总分。")}</p>`
@@ -9709,6 +10332,21 @@ async function scanVideoVocab({ force = false } = {}) {
   const videoId = state.videoId;
   try {
     const known = new Set(vocab.map((v) => String(v.word || "").toLowerCase()));
+    if (wordPackReady(level.id)) {
+      const words = (globalThis.WordLevel?.scanLocal(state.segments, {
+        packWords: packKnownSet(level),
+        userKnown: known,
+        limit: 24,
+      }) || []).map((w) => ({
+        ...w,
+        why: w.why || t("不在「{name}」词包里", { name: level.label }),
+      }));
+      if (state.videoId !== videoId) return;
+      state.levelScan = { words, key, scanned: true, error: "", local: true };
+      vocabCardIndex = 0;
+      saveCache();
+      return;
+    }
     const tokens = globalThis.WordLevel?.candidates(state.segments, { known }) || [];
     if (!tokens.length) {
       state.levelScan = { words: [], key, scanned: true, error: "" };
@@ -9821,7 +10459,10 @@ function showWordCard(word, entry = {}) {
       await removeVocabWord(now.id);
       $("wordSave").textContent = t("存入生词本");
     } else {
+      const existingDef = vocab.find((v) => v.word.toLowerCase() === String(word).toLowerCase())?.definition;
       await addVocab(word, entry.sentence, entry.seconds);
+      const row = vocab.find((v) => v.word.toLowerCase() === String(word).toLowerCase());
+      if (row && existingDef && !row.definition) row.definition = existingDef;
       $("wordSave").textContent = vocabByWord(word) ? t("从本里去掉") : t("存入生词本");
     }
   });
@@ -9943,6 +10584,7 @@ async function openExport() {
   }
   await chrome.storage.local.set({ vb_export: payload });
   chrome.tabs.create({ url: chrome.runtime.getURL("export.html") });
+  checkAchievementsSoon("export");
 }
 
 function looksZh(text) {
@@ -10150,6 +10792,7 @@ async function extractGoldQuotes({ quiet = false, force = false } = {}) {
     state.quoteExtracted = true;
     state.quoteError = "";
     await saveList("vb_quotes", quotes);
+    if (fresh.length) checkAchievementsSoon();
     saveCache();
     renderQuoteRail();
     paintGoldRows();
@@ -10423,6 +11066,7 @@ async function saveQuote(seconds, text, videoId = state.videoId, videoTitle = st
   });
   if (quotes.length > 400) quotes.length = 400;
   await saveList("vb_quotes", quotes);
+  checkAchievementsSoon();
   renderNotes();
   return true;
 }
@@ -10511,6 +11155,37 @@ async function applyHotkey(payload) {
       return;
     }
     await dropMark({ seconds: t, label: line, videoId: vid, videoTitle: title });
+    return;
+  }
+  if (payload.action === "peek") {
+    if (vid && state.videoId && vid !== state.videoId) return;
+    followPlayback = true;
+    followPausedByUser = false;
+    followLockUntil = Date.now() + 600;
+    switchView("read");
+    seek(t);
+    updateFollowBtn();
+    return;
+  }
+  if (payload.action === "highlight") {
+    const stored = await chrome.storage.local.get("vb_highlights");
+    if (Array.isArray(stored.vb_highlights)) highlights = stored.vb_highlights;
+    afterHighlightChange([segmentIndexAt(t)]);
+    return;
+  }
+  if (payload.action === "define") {
+    const word = String(payload.text || "").trim();
+    if (!word) return;
+    switchView("read");
+    openWordCard(word, { sentence: line, seconds: t });
+    return;
+  }
+  if (payload.action === "vocab") {
+    const word = String(payload.text || "").trim();
+    if (word) {
+      await addVocab(word, line, t);
+      openWordCard(word, { sentence: line, seconds: t });
+    }
     return;
   }
   if (payload.action === "loop") {
@@ -10862,6 +11537,7 @@ async function gradeCard(card, grade, opts = {}) {
     card.due = now + card.interval * DAY;
   }
   await saveList("vb_cards", cards);
+  if (grade !== "again") checkAchievementsSoon();
   if (reviewFocusId === card.id) reviewFocusId = "";
   reviewRevealed = false;
   vocabReviewRevealed = false;
@@ -10894,12 +11570,15 @@ function uncardedVocab() {
 function vocabCardFrom(v) {
   const word = String(v.word || "").trim();
   const sentence = String(preferredVocabSource(v)?.sentence || v.sentence || "");
+  const ipa = v.definition?.phonetic || "";
   const zh = v.definition?.senses?.[0]?.zh || v.definition?.meaning || "";
+  const usage = v.definition?.usage || v.definition?.examples?.[0]?.en || "";
+  const back = [ipa, zh, usage].filter(Boolean).join(" · ") || t("还没查到释义，点开词卡再查");
   const pattern = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   if (sentence && pattern.test(sentence)) {
-    return { front: sentence.replace(pattern, "____"), back: word, hint: zh };
+    return { front: sentence.replace(pattern, "____"), back, hint: zh };
   }
-  return { front: `${word} 是什么意思？`, back: zh || sentence || "回原句确认一下", hint: "" };
+  return { front: `${word} 是什么意思？`, back, hint: sentence || "" };
 }
 
 async function makeVocabCards(list) {
@@ -11333,6 +12012,7 @@ async function askVideo(question) {
   const quote = state.askContext?.type === "quote" ? state.askContext.text : "";
   const payload = buildAskPayload(question.trim());
   state.chat.push({ role: "user", content: question.trim(), quote });
+  checkAchievementsSoon("ask");
   renderChat();
   $("askSend").disabled = true;
   try {
@@ -11396,15 +12076,40 @@ async function pollTickWork() {
     return;
   }
   const hrefId = tabVideoId(tab) || videoIdFromHref(tabHref(tab));
+  const watchPage = isWatchHost(tabHref(tab));
   const ready = await ensureContentScript(tab.id);
   if (isLooping() && ready) applyLoopToPage();
   const info = ready ? (await sendToTab({ type: "VB_VIDEO_INFO" })) || {} : {};
   if (ready && Number(info.rate) > 0 && Math.abs(Number(info.rate) - playbackRate) > 0.04) {
     sendToTab({ type: "VB_RATE", rate: playbackRate });
   }
+  if (info.unavailable) {
+    takeIncomingWatch({
+      videoId: hrefId || "",
+      title: info.title || tab.title || "",
+      tabId: tab.id,
+      url: tab.url || tabHref(tab),
+      unavailable: true,
+      watchPage,
+      activeWatch: Boolean(tab.active),
+      source: "poll",
+    });
+    return;
+  }
   const videoId =
     pickPollVideoId(hrefId, info) || (await withTimeout(probePageVideoId(tab.id), 800));
   if (!videoId) {
+    if (watchPage && tab.active) {
+      takeIncomingWatch({
+        title: info.title || tab.title || "",
+        tabId: tab.id,
+        url: tab.url || tabHref(tab),
+        watchPage: true,
+        activeWatch: true,
+        source: "poll",
+      });
+      return;
+    }
     if (canShowIdle()) await showIdleWatchState(t("这页还没认出正在播的视频。点一下播放，或把链接贴在下面。"));
     return;
   }
@@ -11414,15 +12119,13 @@ async function pollTickWork() {
     tabId: tab.id,
     url: tab.url || tabHref(tab),
     ad: Boolean(info.ad),
+    watchPage,
+    activeWatch: Boolean(tab.active),
     source: "poll",
   });
   if (videoId !== state.videoId) return;
   if (Number.isFinite(info.currentTime)) {
     state.lastSeconds = info.currentTime;
-    const at = state.blocks.findIndex(
-      (b) => info.currentTime >= b.start && info.currentTime < b.end,
-    );
-    if (at >= 0 && blockProgress(at) === "fresh") setProgress(at, "learning");
   }
 }
 
@@ -11452,7 +12155,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
   bindCoreClicks();
   closeClickBlockers();
-  await Promise.all([loadSettings(), loadLists()]);
+  await Promise.all([loadSettings(), loadLists(), loadWordPacks()]);
+  syncLangButtons();
+  checkAchievements({ silent: true }).catch(() => {});
   if (pendingWatchInfo) takeIncomingWatch(pendingWatchInfo);
   await syncVocabCards();
   if (settingsCache.kouling) koulingPull({ silent: true }).catch(() => {});
@@ -11542,6 +12247,44 @@ document.addEventListener("DOMContentLoaded", async () => {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.vb_inbox?.newValue) {
       applyHotkey(changes.vb_inbox.newValue);
+    }
+    if (area === "local" && changes.vb_settings?.newValue) {
+      const incoming = changes.vb_settings.newValue;
+      settingsCache = { ...settingsCache, ...incoming };
+      if ($("setLiveCc") && typeof incoming.liveCc === "boolean") {
+        $("setLiveCc").checked = incoming.liveCc;
+      }
+      paintLiveStyleSettings();
+      const nextMode = incoming.transcriptMode;
+      if (
+        nextMode &&
+        nextMode !== state.transcriptMode &&
+        (nextMode === "original" || nextMode === "zh" || nextMode === "bilingual")
+      ) {
+        state.transcriptMode = nextMode;
+        renderTranscript({ force: true });
+        syncLangButtons();
+        if (nextMode !== "original") translateAll();
+      }
+    }
+    if (area === "local" && Array.isArray(changes.vb_highlights?.newValue)) {
+      highlights = changes.vb_highlights.newValue;
+      afterHighlightChange();
+    }
+    const cacheKey = state.videoId ? `vb_cache_${state.videoId}` : "";
+    const incomingZh = cacheKey && changes[cacheKey]?.newValue?.translations;
+    if (area === "local" && incomingZh && state.segments.length) {
+      let added = false;
+      Object.entries(incomingZh).forEach(([k, v]) => {
+        const i = Number(k);
+        if (!Number.isInteger(i) || translationAt(i)) return;
+        const zh = cleanZh(v);
+        if (!isRealTranslation(zh, state.segments[i]?.text)) return;
+        state.translations[i] = zh;
+        added = true;
+        patchRowTranslation(i);
+      });
+      if (added) renderTranslateBar();
     }
   });
   chrome.runtime.onMessage.addListener((message) => {
@@ -11692,6 +12435,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     openTutorial(true);
   });
   $("reviewTopBtn")?.addEventListener("click", () => goReview());
+  $("achieveTopBtn")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const pop = $("achievePop");
+    setAchievePop(Boolean(pop?.hidden));
+  });
   $("exportTopBtn")?.addEventListener("click", openExport);
   $("exportBtn")?.addEventListener("click", openExport);
 
@@ -11699,6 +12447,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.stopPropagation();
     $("moreMenu") && ($("moreMenu").hidden = true);
     setVocabPop(false);
+    setAchievePop(false);
     const pop = $("themePop");
     const willOpen = Boolean(pop?.hidden);
     if (willOpen) paintThemeChrome();
@@ -11711,6 +12460,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("moreBtn").setAttribute("aria-expanded", String(!menu.hidden));
     if (!menu.hidden) {
       setVocabPop(false);
+      setAchievePop(false);
       if ($("themePop")) $("themePop").hidden = true;
     }
   });
@@ -11718,6 +12468,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.stopPropagation();
     const pop = $("vocabLevelPop");
     setVocabPop(Boolean(pop?.hidden));
+    setAchievePop(false);
     if ($("themePop")) $("themePop").hidden = true;
   });
   document.addEventListener("click", (event) => {
@@ -11727,6 +12478,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if ($("themePop")) $("themePop").hidden = true;
     if (event.target.closest?.("#vocabLevelPop") || event.target.closest?.("#vocabLevelBtn")) return;
     setVocabPop(false);
+    if (event.target.closest?.("#achievePop") || event.target.closest?.("#achieveTopBtn")) return;
+    setAchievePop(false);
   });
 
   $("settingsTopBtn")?.addEventListener("click", () => toggleSettings());
@@ -11841,6 +12594,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("followBtn")?.addEventListener("click", () => {
     followPlayback = !followPlayback;
+    followPausedByUser = false;
     if (followPlayback) {
       lastUserScrollAt = 0;
       lastFollowedStart = -1;
@@ -11854,13 +12608,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.preventDefault();
     const seconds = parseJumpInput($("jumpInput").value);
     if (seconds == null) {
-      flashHint("时间写成 12:30 或秒数。");
+      flashHint("时间写成 1:30:00、12:30 或秒数。");
       return;
     }
     seek(seconds);
   });
-  document.addEventListener("wheel", pauseFollowFromUser, { passive: true });
-  document.addEventListener("touchmove", pauseFollowFromUser, { passive: true });
+  $("transcriptBox")?.addEventListener("wheel", pauseFollowFromUser, { passive: true });
+  $("transcriptBox")?.addEventListener("touchmove", pauseFollowFromUser, { passive: true });
   updateFollowBtn();
 
   $("modeOriginal").addEventListener("click", () => setTranscriptMode("original"));

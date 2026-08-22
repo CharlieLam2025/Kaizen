@@ -120,7 +120,18 @@ async function adoptOpenWatchTabs() {
 const CONTENT_SCRIPT_FILES = ["i18n.js", "i18n-dict.js", "site.js", "content.js"];
 
 async function injectContentScripts(tabId) {
-  await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES });
+  if (!tabId) return false;
+  let hasCore = false;
+  try {
+    const [shot] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(globalThis.__KAIZEN_CS__?.i18n && globalThis.__KAIZEN_CS__?.site),
+    });
+    hasCore = Boolean(shot?.result);
+  } catch (_e) {}
+  const files = hasCore ? ["content.js"] : CONTENT_SCRIPT_FILES;
+  await chrome.scripting.executeScript({ target: { tabId }, files });
+  return true;
 }
 
 async function recoverWatchPages() {
@@ -187,6 +198,7 @@ const DEFAULT_SETTINGS = {
   diveModel: "deepseek-v4-pro",
   supadataKey: "",
   koulingUrl: "",
+  transcriptMode: "bilingual",
 };
 
 async function handleKouling(message) {
@@ -362,9 +374,7 @@ async function callAi({ system, messages, json = false, maxTokens = 4096, model,
 // ---------- helpers ----------
 
 function clock(seconds) {
-  const s = Math.max(0, Math.floor(seconds));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, "0")}`;
+  return formatClock(seconds);
 }
 
 /** "[m:ss] line" transcript, truncated from the middle to keep both ends. */
@@ -399,14 +409,17 @@ const SEGMENT_SYSTEM = `你是一个视频内容架构师。给你一支 YouTube
 {"gist":"整支视频一句话","blocks":[{"start":0,"end":123,"title":"…","summary":"…","category":"concept"}]}
 start/end 是秒数。`;
 
-async function handleSegment({ segments, title, durationSeconds }) {
+async function handleSegment({ segments, title, durationSeconds, uiLang }) {
+  const settings = await getSettings();
+  const lang = normalizeLang(uiLang || settings.uiLang) || "zh-CN";
+  setUiLang(lang);
   const text = await callAi({
     system: SEGMENT_SYSTEM,
     json: true,
     messages: [
       {
         role: "user",
-        content: `视频标题：${title || "未知"}\n视频总长：${Math.round(durationSeconds || 0)} 秒\n\n字幕：\n${compactTranscript(segments)}`,
+        content: `界面语言：${langMeta(lang).ai}\n视频标题：${title || "未知"}\n视频总长：${Math.round(durationSeconds || 0)} 秒\n块标题、摘要、gist 必须用${langMeta(lang).ai}写，不要用英文交差。\n\n字幕：\n${compactTranscript(segments)}`,
       },
     ],
   });
@@ -727,7 +740,7 @@ async function handleAsk({ question, contextText, title, gist, at, focus, outlin
 
 function translateSystem(settings) {
   const name = langMeta(normalizeLang(settings.uiLang) || "zh-CN").ai;
-  return `把视频字幕逐行翻译成${name}。口语、自然、忠实原意；专有名词和常用技术词保留原文。
+  return `把视频字幕逐行翻译成${name}。口语、自然、忠实原意；专有名词和常用技术词可夹在译文里，但整句必须是${name}，禁止整句照抄原文。
 输入是一个字符串数组。输出数组长度必须相同，不要合并或拆分。
 每条译文不要带序号，不要写成「1. …」「27. …」。
 
@@ -749,8 +762,14 @@ async function handleTranslate({ lines }) {
     messages: [{ role: "user", content: JSON.stringify(src) }],
   });
   const parsed = parseLooseJson(text);
-  const out = Array.isArray(parsed.t) ? parsed.t.map((s) => cleanZh(s)) : [];
-  if (!out.length) throw new Error("翻译结果为空");
+  const raw = Array.isArray(parsed.t) ? parsed.t : [];
+  const out = src.map((line, i) => {
+    const zh = cleanZh(raw[i] || "");
+    if (!zh || sameAsSource(zh, line)) return "";
+    if (/翻译失败|筛词失败|拆块失败|额度不够|钥匙无效/i.test(zh)) return "";
+    if (!/[\u4e00-\u9fff]/.test(zh) && /(error|exception|failed|request|api key)/i.test(zh)) return "";
+    return zh;
+  });
   return { translations: out };
 }
 
@@ -1403,7 +1422,13 @@ async function biliTranscriptFromTab(videoId) {
         res = await chrome.tabs.sendMessage(tab.id, { type: "VB_TRANSCRIPT", videoId });
       }
       if (res?.ok && res.segments?.length) {
-        return { segments: res.segments, language: res.language || "", trackKind: "bili", title: res.title || "" };
+        return {
+          segments: res.segments,
+          translations: res.translations || {},
+          language: res.language || "",
+          trackKind: "bili",
+          title: res.title || "",
+        };
       }
     } catch (_e) {
       /* next tab */
@@ -1440,12 +1465,13 @@ async function youtubeTranscriptFromTab(videoId) {
       const here = videoIdFromHref(tab.url || tab.pendingUrl || "");
       if (here && here !== videoId) continue;
       if (tab.id && !tabIds.includes(tab.id)) tabIds.push(tab.id);
+      if (tabIds.length >= 2) break;
     }
   } catch (_e) {}
   const askTab = (tabId, payload) =>
     Promise.race([
       chrome.tabs.sendMessage(tabId, payload),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 9000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 10000)),
     ]).catch(() => null);
 
   for (const tabId of tabIds) {
@@ -1458,6 +1484,7 @@ async function youtubeTranscriptFromTab(videoId) {
       if (res?.ok && res.segments?.length) {
         return {
           segments: res.segments,
+          translations: res.translations || {},
           language: res.language || "",
           trackKind: res.trackKind || "page",
           title: res.title || "",
@@ -1481,32 +1508,47 @@ async function fetchSupadataTranscript(videoId, settings) {
     headers: { "x-api-key": settings.supadataKey },
   });
 
+  const failSupadata = async (res) => {
+    const body = await res.text().catch(() => "");
+    if (res.status === 429 || /limit[- ]?exceeded|quota|额度/i.test(body)) {
+      throw new Error("字幕额度用完了");
+    }
+    if (res.status === 401 || /invalid api|unauthorized/i.test(body)) throw new Error("Supadata Key 无效");
+    if (res.status === 206) throw new Error("这支视频没有可用字幕");
+    throw new Error(`Supadata 请求失败（${res.status}）`);
+  };
+
   if (response.status === 202) {
     const { jobId } = await response.json();
     let data = null;
-    for (let i = 0; i < 24; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+    for (let i = 0; i < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
       const poll = await fetch(
         `https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`,
         { headers: { "x-api-key": settings.supadataKey } },
       );
-      if (!poll.ok) throw new Error(`Supadata 任务查询失败（${poll.status}）`);
+      if (!poll.ok) await failSupadata(poll);
       data = await poll.json();
       if (data.status === "completed") break;
       if (data.status === "failed") throw new Error("Supadata 转写任务失败");
       data = null;
     }
-    if (!data) throw new Error("Supadata 任务超时（60 秒）");
+    if (!data) throw new Error("打开字幕超时了");
     return finishSupadata(data);
   }
 
-  if (response.status === 206) throw new Error("Supadata：这支视频没有原生字幕轨");
-  if (response.status === 401) throw new Error("Supadata Key 无效");
-  if (!response.ok) throw new Error(`Supadata 请求失败（${response.status}）`);
+  if (!response.ok) await failSupadata(response);
   return finishSupadata(await response.json());
 }
 
-async function handleSupadataTranscript({ videoId }) {
+function withHardTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
+  ]);
+}
+
+async function handleSupadataTranscriptWork({ videoId }) {
   if (isBiliId(videoId)) return handleBiliTranscript({ videoId });
   const fromPage = await Promise.race([
     youtubeTranscriptFromTab(videoId),
@@ -1528,6 +1570,49 @@ async function handleSupadataTranscript({ videoId }) {
     if (remoteError) throw new Error(remoteError);
     throw new Error("这支视频自己的字幕读不到。打开视频确认有 CC，或在设置里填 Supadata Key 再试。");
   }
+}
+
+async function handleSupadataTranscript({ videoId }) {
+  return withHardTimeout(handleSupadataTranscriptWork({ videoId }), 18000, "打开字幕超时了");
+}
+
+async function handlePingKeys({ apiKey, supadataKey, baseUrl }) {
+  const settings = await getSettings();
+  const dsKey = String(apiKey ?? settings.apiKey ?? "").trim();
+  const sdKey = String(supadataKey ?? settings.supadataKey ?? "").trim();
+  const base = String(baseUrl || settings.baseUrl || "https://api.deepseek.com/v1").replace(/\/$/, "");
+  const out = { deepseek: { ok: false, error: "" }, supadata: { ok: false, error: "", skipped: false } };
+  if (!dsKey) {
+    out.deepseek.error = "还没有填 DeepSeek Key";
+  } else {
+    try {
+      const res = await fetch(`${base}/models`, {
+        headers: { Authorization: `Bearer ${dsKey}` },
+      });
+      if (res.status === 401) throw new Error("DeepSeek Key 无效");
+      if (!res.ok) throw new Error(`DeepSeek 请求失败（${res.status}）`);
+      out.deepseek.ok = true;
+    } catch (error) {
+      out.deepseek.error = error.message || "DeepSeek Key 连不上";
+    }
+  }
+  if (!sdKey) {
+    out.supadata.skipped = true;
+    out.supadata.ok = true;
+  } else {
+    try {
+      const url = new URL("https://api.supadata.ai/v1/transcript");
+      url.searchParams.set("url", "https://www.youtube.com/watch?v=kaizenping");
+      url.searchParams.set("mode", "native");
+      const res = await fetch(url.toString(), { headers: { "x-api-key": sdKey } });
+      if (res.status === 401) throw new Error("Supadata Key 无效");
+      if (res.status === 429) throw new Error("字幕额度用完了");
+      out.supadata.ok = true;
+    } catch (error) {
+      out.supadata.error = error.message || "Supadata Key 连不上";
+    }
+  }
+  return out;
 }
 
 function finishSupadata(data) {
@@ -1572,7 +1657,7 @@ async function handleDirectTranscript({ videoId }) {
   const track =
     (Array.isArray(tracks) ? tracks.find((t) => t.kind !== "asr") : null) ||
     tracks?.[0];
-  if (!track?.baseUrl) throw new Error("InnerTube：无字幕轨");
+  if (!track?.baseUrl) throw new Error("这支视频没有可用字幕");
 
   const withFormat = (fmt) => {
     const url = new URL(track.baseUrl, "https://www.youtube.com");
@@ -1641,14 +1726,54 @@ async function handleDirectTranscript({ videoId }) {
   }
 
   if (!segments.length) throw new Error("InnerTube 字幕解析失败");
+  let translations = {};
+  const srcLang = String(track.languageCode || "");
+  if (track.isTranslatable !== false && !isZhCaptionLang(srcLang)) {
+    translations = await fetchTlangTranslations(track.baseUrl, segments);
+  }
   const details = player.videoDetails || {};
   return {
     segments,
+    translations,
     language: track.languageCode || "",
     trackKind: track.kind || "manual",
     title: details.title || "",
     channel: details.author || "",
   };
+}
+
+async function fetchTlangTranslations(baseUrl, segments) {
+  if (!baseUrl || !segments?.length) return {};
+  const tlang = typeof captionTlang === "function" ? captionTlang() : "zh-Hans";
+  const url = new URL(baseUrl, "https://www.youtube.com");
+  url.searchParams.delete("fmt");
+  url.searchParams.set("fmt", "json3");
+  url.searchParams.set("tlang", tlang);
+  try {
+    const cap = await fetch(url.toString());
+    if (!cap.ok) return {};
+    const events = JSON.parse(await cap.text()).events || [];
+    const raw = [];
+    for (const ev of events) {
+      if (!Array.isArray(ev.segs)) continue;
+      const text = ev.segs
+        .map((s) => s.utf8 || "")
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!text) continue;
+      const start = (ev.tStartMs || 0) / 1000;
+      raw.push({
+        text,
+        offset: start * 1000,
+        duration: ev.dDurationMs || 0,
+      });
+    }
+    const zhSegs = mergeSupadataChunks(raw);
+    return alignCaptionTranslations(segments, zhSegs);
+  } catch (_e) {
+    return {};
+  }
 }
 
 const EXPORT_SYSTEM = `你是知识笔记编辑。把用户的学习材料整理成一篇可以长期保存的中文笔记。只输出 JSON：
@@ -1891,6 +2016,7 @@ const HANDLERS = {
   vbAsk: handleAsk,
   vbTranslate: handleTranslate,
   vbSupadata: handleSupadataTranscript,
+  vbPingKeys: handlePingKeys,
   vbDirectTranscript: handleDirectTranscript,
   vbDefine: handleDefineWord,
   vbStudy: handleStudyPack,

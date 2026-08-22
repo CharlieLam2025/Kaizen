@@ -45,8 +45,13 @@ function youtubeIdFromHref(url) {
   const v = url.searchParams.get("v");
   if (v) return v;
   const parts = url.pathname.split("/").filter(Boolean);
-  if (["shorts", "live", "embed", "v", "e"].includes(parts[0])) return parts[1] || null;
-  if (url.hostname.includes("youtu.be")) return parts[0] || null;
+  const head = String(parts[0] || "").toLowerCase();
+  if (["shorts", "live", "embed", "v", "e", "watch"].includes(head)) return parts[1] || null;
+  const host = String(url.hostname || "").toLowerCase();
+  if (host === "youtu.be" || host.endsWith(".youtu.be")) return parts[0] || null;
+  if (host === "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com")) {
+    return ["embed", "live", "shorts", "watch"].includes(head) ? parts[1] || null : parts[0] || null;
+  }
   return null;
 }
 
@@ -124,8 +129,9 @@ function markFaceUrl(id) {
 }
 
 function watchAdoptDecision(info, ctx) {
+  if (info?.unavailable || info?.unreadable) return "clear";
   const videoId = String(info?.videoId || "");
-  if (!videoId) return "skip-empty";
+  if (!videoId) return info?.watchPage ? "clear" : "skip-empty";
   if (info?.ad) return "skip-ad";
   if (ctx?.loadingVideoId && videoId === String(ctx.loadingVideoId)) return "skip-loading";
   const opened = Boolean(ctx?.videoId && Number(ctx.segments) > 0);
@@ -134,9 +140,41 @@ function watchAdoptDecision(info, ctx) {
   if (force) return "open";
   if (opened) {
     if (info.tabId && ctx.tabId && Number(info.tabId) === Number(ctx.tabId)) return "open";
+    if (info.activeWatch) return "open";
     return "skip-opened";
   }
   return "open";
+}
+
+function formatClock(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function parseClockInput(raw) {
+  const text = String(raw || "").trim().replace(/：/g, ":");
+  if (!text) return null;
+  const parts = text.match(/^(\d{1,3}):([0-5]?\d)(?::([0-5]?\d))?$/);
+  if (parts) {
+    if (parts[3] != null) return Number(parts[1]) * 3600 + Number(parts[2]) * 60 + Number(parts[3]);
+    return Number(parts[1]) * 60 + Number(parts[2]);
+  }
+  const sec = Number(text);
+  return Number.isFinite(sec) && sec >= 0 ? sec : null;
+}
+
+function sameAsSource(zh, en) {
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "");
+  const a = norm(zh);
+  const b = norm(en);
+  return Boolean(a && b && a === b);
 }
 
 function watchUrl(videoId, seconds) {
@@ -157,12 +195,78 @@ function watchUrl(videoId, seconds) {
 function pickBiliTrack(tracks) {
   const rank = (t) => {
     const lan = String(t.lan || t.lan_doc || "").toLowerCase();
-    if (/ai-zh|zh-cn|zh-hans|^zh$/.test(lan)) return 0;
-    if (/zh/.test(lan)) return 1;
-    if (/en/.test(lan)) return 2;
-    return 3;
+    if (/ai-en|^en$|en-us|en-gb/.test(lan)) return 0;
+    if (/en/.test(lan)) return 1;
+    if (/ai-zh|zh-cn|zh-hans|^zh$/.test(lan)) return 3;
+    if (/zh/.test(lan)) return 4;
+    return 2;
   };
   return [...(tracks || [])].sort((a, b) => rank(a) - rank(b))[0] || null;
+}
+
+function pickBiliZhTrack(tracks, source) {
+  const srcUrl = source?.subtitle_url || source?.subtitleUrl || source?.url || "";
+  const rank = (t) => {
+    const lan = String(t.lan || t.lan_doc || "").toLowerCase();
+    const url = t?.subtitle_url || t?.subtitleUrl || t?.url || "";
+    if (t === source || (srcUrl && url === srcUrl)) return 99;
+    if (/ai-zh|zh-cn|zh-hans|^zh$/.test(lan)) return 0;
+    if (/zh/.test(lan)) return 1;
+    return 99;
+  };
+  const hit = [...(tracks || [])].sort((a, b) => rank(a) - rank(b))[0];
+  return hit && rank(hit) < 99 ? hit : null;
+}
+
+function captionTlang(lang) {
+  const raw = String(
+    lang || (typeof currentLang === "function" ? currentLang() : "") || "",
+  ).toLowerCase();
+  if (raw.startsWith("zh-tw") || raw.startsWith("zh-hk") || raw.includes("hant")) return "zh-Hant";
+  if (raw.startsWith("ja")) return "ja";
+  if (raw.startsWith("ko")) return "ko";
+  if (raw.startsWith("es")) return "es";
+  if (raw.startsWith("fr")) return "fr";
+  if (raw.startsWith("de")) return "de";
+  if (raw.startsWith("pt")) return "pt";
+  if (raw.startsWith("ru")) return "ru";
+  if (raw.startsWith("vi")) return "vi";
+  if (raw.startsWith("th")) return "th";
+  if (raw.startsWith("id")) return "id";
+  if (raw.startsWith("ar")) return "ar";
+  return "zh-Hans";
+}
+
+function isZhCaptionLang(code) {
+  return /^zh\b/.test(String(code || "").toLowerCase());
+}
+
+function alignCaptionTranslations(srcSegs, zhSegs) {
+  const out = {};
+  if (!srcSegs?.length || !zhSegs?.length) return out;
+  let j = 0;
+  for (let i = 0; i < srcSegs.length; i++) {
+    const seg = srcSegs[i];
+    const start = Number(seg.start) || 0;
+    const end = Number(seg.end) || start + 2;
+    const mid = (start + end) / 2;
+    while (j + 1 < zhSegs.length && Number(zhSegs[j + 1].start) <= mid) j += 1;
+    let best = zhSegs[j];
+    let bestDist = Math.abs((Number(best.start) + Number(best.end || best.start + 2)) / 2 - mid);
+    for (let k = Math.max(0, j - 2); k < Math.min(zhSegs.length, j + 3); k++) {
+      const z = zhSegs[k];
+      const zMid = (Number(z.start) + Number(z.end || z.start + 2)) / 2;
+      const dist = Math.abs(zMid - mid);
+      if (dist < bestDist) {
+        best = z;
+        bestDist = dist;
+      }
+    }
+    const overlap = Math.min(end, Number(best.end || best.start + 2)) - Math.max(start, Number(best.start));
+    const text = String(best.text || "").trim();
+    if (text && (overlap > 0.12 || bestDist < 1.4)) out[i] = text;
+  }
+  return out;
 }
 
 function collectBiliTracks(...groups) {
@@ -298,19 +402,20 @@ function md5hex(src) {
     .join("");
 }
 
-const WBI_MIXIN = [
+var WBI_MIXIN = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41,
   13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34,
   44, 52,
 ];
 
-let wbiKey = { mixin: "", at: 0 };
+var wbiKey = { mixin: "", at: 0 };
 
 async function biliJson(url) {
   const res = await fetch(url, {
     credentials: "include",
     headers: { Referer: "https://www.bilibili.com/" },
   });
+  if (res.status === 412) throw new Error("B 站拒绝了这次访问，稍后重试");
   if (!res.ok) throw new Error(`读页面失败（${res.status}）`);
   return res.json();
 }
@@ -343,22 +448,37 @@ async function biliWbiUrl(path, params) {
   return `${path}?${qs}&w_rid=${md5hex(qs + mixin)}`;
 }
 
-async function finishBiliTracks(tracks, title) {
-  const track = pickBiliTrack(tracks);
+async function biliTrackSegments(track) {
   let subUrl = track?.subtitle_url || track?.subtitleUrl || track?.url || "";
   if (subUrl.startsWith("//")) subUrl = `https:${subUrl}`;
-  if (!subUrl) throw new Error("B 站字幕要先登录。打开这支视频确认能出字幕，再点重试。");
+  if (!subUrl) return [];
   const body = await biliJson(subUrl);
   const rows = body.body || body.data?.body || [];
-  const segments = rows
+  return rows
     .map((row) => ({
       start: Number(row.from) || 0,
       end: Number(row.to) || 0,
       text: String(row.content || "").replace(/\s+/g, " ").trim(),
     }))
     .filter((row) => row.text);
+}
+
+async function finishBiliTracks(tracks, title) {
+  const track = pickBiliTrack(tracks);
+  let subUrl = track?.subtitle_url || track?.subtitleUrl || track?.url || "";
+  if (subUrl.startsWith("//")) subUrl = `https:${subUrl}`;
+  if (!subUrl) throw new Error("B 站字幕要先登录。打开这支视频确认能出字幕，再点重试。");
+  const segments = await biliTrackSegments(track);
   if (!segments.length) throw new Error("字幕是空的");
-  return { segments, language: track.lan || "", trackKind: "bili", title: title || "" };
+  let translations = {};
+  const zhTrack = pickBiliZhTrack(tracks, track);
+  if (zhTrack) {
+    try {
+      const zhSegs = await biliTrackSegments(zhTrack);
+      translations = alignCaptionTranslations(segments, zhSegs);
+    } catch (_e) {}
+  }
+  return { segments, translations, language: track.lan || "", trackKind: "bili", title: title || "" };
 }
 
 async function fetchBiliTranscript(videoId) {
@@ -396,3 +516,6 @@ async function fetchBiliTranscript(videoId) {
   }
   return finishBiliTracks(tracks, title);
 }
+
+if (!globalThis.__KAIZEN_CS__) globalThis.__KAIZEN_CS__ = {};
+globalThis.__KAIZEN_CS__.site = 1;
