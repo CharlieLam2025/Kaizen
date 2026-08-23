@@ -302,11 +302,11 @@ function parseLooseJson(text) {
   throw new Error("AI 这次返回的格式乱了，再试一次。");
 }
 
-function pickAiText(data, { json = false } = {}) {
+function pickAiText(data, { json = false, allowReasoning = false } = {}) {
   const msg = data?.choices?.[0]?.message || {};
   const content = String(msg.content ?? "").trim();
   if (content) return content;
-  if (json) return "";
+  if (json || !allowReasoning) return "";
   return String(msg.reasoning_content || msg.reasoning || "").trim();
 }
 
@@ -322,6 +322,7 @@ async function callAi({
   _plain = false,
   _retriedJson = false,
   _retriedLength = false,
+  _retried429 = 0,
 }) {
   const settings = await getSettings();
   setUiLang(settings.uiLang);
@@ -350,8 +351,8 @@ async function callAi({
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    if (res.status === 429 && !_retried) {
-      await new Promise((ok) => setTimeout(ok, 1400));
+    if (res.status === 429 && _retried429 < 3) {
+      await new Promise((ok) => setTimeout(ok, 1200 * (_retried429 + 1)));
       return callAi({
         system,
         messages,
@@ -360,10 +361,11 @@ async function callAi({
         model,
         temperature,
         think,
-        _retried: true,
+        _retried,
         _plain,
         _retriedJson,
         _retriedLength,
+        _retried429: _retried429 + 1,
       });
     }
     if (!_plain && res.status === 400) {
@@ -379,6 +381,7 @@ async function callAi({
         _plain: true,
         _retriedJson,
         _retriedLength,
+        _retried429,
       });
     }
     throw new Error(`AI 请求失败（${res.status}）${body.slice(0, 200)}`);
@@ -400,6 +403,7 @@ async function callAi({
       _plain,
       _retriedJson: true,
       _retriedLength,
+      _retried429,
     });
   }
   if ((thinkingOn || reason === "length") && !_retriedLength) {
@@ -415,6 +419,7 @@ async function callAi({
       _plain,
       _retriedJson,
       _retriedLength: true,
+      _retried429,
     });
   }
   throw new Error(reason === "length" ? "回答被截断了，再试一次。" : "AI 返回为空");
@@ -803,11 +808,12 @@ function cleanZh(text) {
 }
 
 function polishTranslateLine(zh, line) {
-  const cleaned = cleanZh(zh);
-  if (!cleaned || sameAsSource(cleaned, line)) return "";
-  if (/翻译失败|筛词失败|拆块失败|额度不够|钥匙无效/i.test(cleaned)) return "";
-  if (!/[\u4e00-\u9fff]/.test(cleaned) && /(error|exception|failed|request|api key)/i.test(cleaned)) return "";
-  return cleaned;
+  return typeof usableTranslation === "function" ? usableTranslation(zh, line) : cleanZh(zh);
+}
+
+function isRethrowTranslateError(err) {
+  const text = `${err?.code || ""} ${err?.message || err || ""}`;
+  return /NO_KEY|401|402|429|5\d\d|额度|钥匙|欠费|Failed to fetch|network|网络|超时|AI 请求失败/i.test(text);
 }
 
 async function translateChunk(src, settings) {
@@ -821,13 +827,18 @@ async function translateChunk(src, settings) {
       temperature: 0.2,
       messages: [{ role: "user", content: `json\n${JSON.stringify(src)}` }],
     });
-    return pickTranslateRows(parseLooseJson(text));
+    return pickTranslateRows(parseLooseJson(text), src.length);
   };
   let raw = [];
   try {
     raw = await run(true);
-  } catch (_e) {
-    raw = await run(false);
+  } catch (e) {
+    try {
+      raw = await run(false);
+    } catch (err) {
+      if (isRethrowTranslateError(err) || isRethrowTranslateError(e)) throw err;
+      raw = [];
+    }
   }
   let out = src.map((line, i) => polishTranslateLine(raw[i], line));
   const missing = out.map((zh, i) => (zh ? -1 : i)).filter((i) => i >= 0);
@@ -835,10 +846,12 @@ async function translateChunk(src, settings) {
     try {
       raw = await run(false);
       out = src.map((line, i) => polishTranslateLine(raw[i], line));
-    } catch (_e) {}
+    } catch (e) {
+      if (isRethrowTranslateError(e)) throw e;
+    }
   }
   const still = out.map((zh, i) => (zh ? -1 : i)).filter((i) => i >= 0);
-  if (still.length && still.length < src.length) {
+  if (still.length) {
     try {
       const mini = still.map((i) => src[i]);
       const text = await callAi({
@@ -848,12 +861,14 @@ async function translateChunk(src, settings) {
         temperature: 0.2,
         messages: [{ role: "user", content: `json\n${JSON.stringify(mini)}` }],
       });
-      const extra = pickTranslateRows(parseLooseJson(text));
+      const extra = pickTranslateRows(parseLooseJson(text), mini.length);
       still.forEach((i, k) => {
         const zh = polishTranslateLine(extra[k], src[i]);
         if (zh) out[i] = zh;
       });
-    } catch (_e) {}
+    } catch (e) {
+      if (isRethrowTranslateError(e)) throw e;
+    }
   }
   return out;
 }
@@ -865,7 +880,13 @@ async function handleTranslate({ lines }) {
   const size = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 10;
   const out = [];
   for (let i = 0; i < src.length; i += size) {
-    out.push(...(await translateChunk(src.slice(i, i + size), settings)));
+    const chunk = src.slice(i, i + size);
+    try {
+      out.push(...(await translateChunk(chunk, settings)));
+    } catch (e) {
+      if (isRethrowTranslateError(e)) throw e;
+      out.push(...chunk.map(() => ""));
+    }
   }
   return { translations: out };
 }

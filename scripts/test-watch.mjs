@@ -24,6 +24,7 @@ const {
   parseClockInput,
   sameAsSource,
   pickTranslateRows,
+  usableTranslation,
   TRANSLATE_BATCH,
   alignCaptionTranslations,
   captionTlang,
@@ -115,7 +116,10 @@ assert.equal(pickTranslateRows({ t: ["你好", "世界"] }).join("|"), "你好|�
 assert.equal(pickTranslateRows({ translations: ["甲", "乙"] }).join("|"), "甲|乙");
 assert.equal(pickTranslateRows(["一", "二"]).join("|"), "一|二");
 assert.equal(pickTranslateRows({ 1: "后", 0: "先" }).join("|"), "先|后");
+assert.equal(pickTranslateRows({ 0: "甲", 2: "丙" }, 3).join("|"), "甲||丙");
 assert.equal(pickTranslateRows({ gist: "x" }).length, 0);
+assert.equal(usableTranslation("Hello world", "Hello world"), "");
+assert.equal(usableTranslation("你好世界", "Hello world"), "你好世界");
 assert.equal(captionTlang("zh-CN"), "zh-Hans");
 assert.equal(captionTlang("zh-TW"), "zh-Hant");
 {
@@ -211,7 +215,7 @@ assert.match(markFaceUrl("cat"), /mark-cat-golden/);
 assert.match(markFaceUrl("dog"), /mark-dog-samoyed/);
 assert.equal(markFaceUrl("ribbon"), "");
 assert.match(content, /document\.body\.appendChild\(next\)/, "K 条要挂在页面上，不能埋进播放器图层");
-assert.match(content, /VB_CONTENT_REV = 30/, "重载后要升 rev，才能重装 K");
+assert.match(content, /VB_CONTENT_REV = 34/, "重载后要升 rev，才能重装 K");
 assert.doesNotMatch(content, /data-mode="original"/, "字幕语言不要堆在片子上反复点");
 assert.match(content, /liveModeOf\(stored\.vb_settings\?\.transcriptMode\)/, "片上字幕要跟侧栏记住的双语");
 assert.match(content, /function bindLivePointerGuard/, "片子上要点得着，先在页面上拦住播放器");
@@ -237,11 +241,15 @@ assert.match(content, /paintKey === livePaintKey && !geomDirty && \(busy \|\| li
 assert.match(content, /function syncLiveVideo/, "B 站换片也要丢掉上一支的轨");
 assert.match(content, /function liveStill/, "拉轨和补译回来后要确认还是这一支");
 assert.match(content, /function applyLiveSegs/, "换轨要丢掉黏着的旧句");
-assert.match(content, /!segs\.length && liveSegId === id/, "驱逐后 storage 空轨必须清片上内存");
+assert.match(content, /!track\.segs\.length && liveSegId === id/, "驱逐后 storage 空轨必须清片上内存");
 assert.match(content, /resetLiveTrack\(\)/, "空轨要走统一清场");
 assert.match(bg, /!tab\.active/, "后台页的 tick 不能改正在看的片");
 assert.match(panel, /activeWatch/, "前台 tab 换片要马上认，不能等下一轮轮询");
 assert.match(panel, /state\._trackAt/, "同片再开要先比轨是不是新的");
+assert.match(panel, /if \(job !== videoJob \|\| loadingVideoId !== videoId\) return;[\s\S]{0,80}if \(segs\?\.length\)/, "缓存开片也要挡住过期的 loadVideo");
+assert.match(panel, /if \(state\.videoId !== videoId\) return;/, "同片刷新等缓存时切走了就不能再往下跑");
+assert.match(panel, /if \(state\.videoId && state\.segments\.length\) return;/, "认不出 id 时不要清掉已经打开的字幕");
+assert.match(panel, /sendToTabSure\(\{ type: "VB_VIDEO_INFO" \}\)\.then/, "开片后马上跟上真实播放头");
 assert.match(content, /addEventListener\("scroll"/, "滚动时条子要跟上播放器");
 assert.match(content, /onGeom\._raf/, "滚动重放条子要合到一帧，不能每像素都量");
 assert.match(panel, /info\.videoId !== state\.videoId/, "其它页的播放头不能带动这一支");
@@ -256,9 +264,37 @@ assert.match(bg, /function translateChunk/, "多句要按块翻，不能只切�
 assert.match(bg, /missing.length === src.length/, "整块都空要再翻一次");
 assert.match(bg, /_retriedJson/, "JSON 空了和截断要分开重试");
 assert.match(bg, /pickAiText\(data, \{ json \}\)/, "JSON 任务不能把思维链当译文解析");
-assert.match(bg, /res.status === 429 && !_retried/, "429 要歇一下再问");
+assert.match(bg, /json \|\| !allowReasoning/, "翻译和 JSON 都不能把思维链当正文");
+assert.match(bg, /_retried429 < 3/, "429 要多歇几次，不能只问一次");
+assert.match(bg, /raw = \[\]/, "plain 回退再抛也不能把整批打成失败");
+assert.match(bg, /function isRethrowTranslateError/, "钥匙和额度错误不能吞成空成功");
+assert.doesNotMatch(bg, /still\.length && still\.length < src\.length/, "整块都空也要补翻，不能跳过 mini");
 assert.match(content, /liveZhTries/, "片子上译文空了也要再试一次");
-assert.match(panel, /kind === "ok"/, "空译文或回声不能当成功");
+assert.match(content, /usableTranslation/, "片子上英文回声不能当对照成功");
+assert.match(content, /function fillLiveZhPane/, "同句只更新对照，不能拆掉词按钮");
+assert.match(content, /else if \(same && liveCcOn\)/, "只写译文不要清 paintKey 重绘整条");
+assert.match(content, /function pickLiveTrack/, "选哪条轨就只用那条轨的译文");
+assert.match(content, /function adoptLiveTrack/, "过期的拉轨不能把新轨盖回去");
+assert.match(content, /t > Number\(end\) \+ 0\.12/, "两句之间的空档不要黏上一句");
+assert.match(content, /prev\?\.classList\.remove\("on"\)/, "换句时旧 pane 要马上关掉");
+assert.match(content, /t \+ 0\.05 < firstStart/, "片头还没到第一句不要提前显示");
+assert.match(panel, /next\.activeWatch/, "同片换到前台标签要跟上 tabId");
+assert.doesNotMatch(panel, /batchFails >= 3/, "一批失败不能整段退出 translateAll");
+assert.match(panel, /\$\("selBar"\) && !\$\("selBar"\)\.hidden/, "划线条在时才停自动滚");
+assert.match(panel, /function saveProgressSoon/, "播放中只记进度，不要整包写缓存");
+assert.match(content, /function liveZhBlocked/, "对照失败 30 秒后还要再试");
+assert.match(content, /Date.now\(\) - at >= 30000/, "对照失败冷却是 30 秒");
+assert.match(panel, /if \(needFollow\) lastFollowedStart = -1/, "长字幕骨架换成真实行后要重新居中");
+assert.match(panelCss, /\.t-row\.playing \{[\s\S]*overflow-anchor:\s*auto/, "骨架变高时锚定正在读的那一行");
+assert.match(panel, /function sendToTab\(message, tabId/, "poll 要问正在看的标签，不能问旧 tab");
+assert.match(panel, /function isTranslateFatal/, "钥匙错误要认 code，不能只扫 error 字");
+assert.match(panel, /saveCacheSoon\(1500\)/, "翻译收尾不要同步写整包缓存");
+assert.match(bg, /isRethrowTranslateError\(e\)/, "mini 补翻的致命错误也要再抛");
+assert.match(content, /fillLiveZhPane\(panes\[liveFront\], line\)/, "按住划词时不要拆英文词按钮");
+assert.match(content, /Number.isInteger\(idx\) && !liveZhBlocked/, "空档不要白跑对照");
+assert.match(panel, /usableTranslation\(result\.translations/, "侧栏也要用同一套译文过滤");
+assert.match(panel, /message failed/, "后台挂了也要记失败，不能整轮卡住");
+assert.match(panel, /translationKind\(zh, en\) === "ok"/, "空译文或回声不能当成功");
 assert.match(panel, /state\.translateFailed\[i\] = true/, "翻失败要标出来，不能一直转骨架");
 assert.match(panel, /function refreshLoopChrome/, "阅读页循环不能整表重绘知识块");
 assert.match(panel, /currentView\(\) === "bricks"/, "循环按钮只在拆页才重画砖条");
@@ -269,7 +305,7 @@ assert.match(panel, /const savedAt = Date\.now\(\)/, "cache 和 vb_live 要同�
 assert.match(panel, /paintOneTranscriptRow\(i\)/, "划线后不要整页拆掉字幕");
 assert.match(panel, /refreshTranscriptWhenIdle\.gen/, "长字幕刷新要分帧，不能一次 replace 几百行");
 assert.match(panel, /if \(nid === markNearId\) return/, "跟随不要每 tick 扫一遍书签钉");
-assert.match(panel, /saveCacheSoon\(6000\)/, "播放中不要每 15 秒写整包缓存");
+assert.match(panel, /saveProgressSoon\(4000\)/, "播放中只记进度，不要整包写缓存");
 assert.doesNotMatch(panel, /setInterval\(\(\) => \{\s*if \(state\.videoId\) saveCache\(\)/, "不要定时全量 saveCache");
 assert.match(panelCss, /\.t-row\.playing \.zh-skel/, "译文骨架动画只开在正在读的那一行");
 assert.doesNotMatch(panel, /state\.segments\.length > 80/, "长字幕刷新不能整页拆成骨架");
