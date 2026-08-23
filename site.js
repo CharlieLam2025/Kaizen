@@ -177,17 +177,39 @@ function sameAsSource(zh, en) {
   return Boolean(a && b && a === b);
 }
 
-function pickTranslateRows(parsed) {
-  if (Array.isArray(parsed)) return parsed;
-  if (Array.isArray(parsed?.t)) return parsed.t;
-  if (Array.isArray(parsed?.translations)) return parsed.translations;
-  if (parsed && typeof parsed === "object") {
+function pickTranslateRows(parsed, expectedLen) {
+  let rows = [];
+  if (Array.isArray(parsed)) rows = parsed;
+  else if (Array.isArray(parsed?.t)) rows = parsed.t;
+  else if (Array.isArray(parsed?.translations)) rows = parsed.translations;
+  else if (parsed && typeof parsed === "object") {
     const keys = Object.keys(parsed)
       .filter((k) => /^\d+$/.test(k))
       .sort((a, b) => Number(a) - Number(b));
-    if (keys.length) return keys.map((k) => parsed[k]);
+    if (keys.length) {
+      const last = Math.max(...keys.map(Number));
+      const len = Number.isInteger(expectedLen) ? Math.max(expectedLen, last + 1) : last + 1;
+      rows = Array.from({ length: len }, () => "");
+      keys.forEach((k) => {
+        rows[Number(k)] = parsed[k];
+      });
+      return rows;
+    }
   }
-  return [];
+  if (Number.isInteger(expectedLen) && rows.length < expectedLen) {
+    return rows.concat(Array(expectedLen - rows.length).fill(""));
+  }
+  return rows;
+}
+
+function usableTranslation(zh, en) {
+  const cleaned = String(zh ?? "")
+    .replace(/^\s*\d{1,4}(?:\.|\．|、|\)|：|:)\s+/, "")
+    .trim();
+  if (!cleaned || sameAsSource(cleaned, en)) return "";
+  if (/翻译失败|筛词失败|拆块失败|额度不够|钥匙无效/i.test(cleaned)) return "";
+  if (!/[\u4e00-\u9fff]/.test(cleaned) && /(error|exception|failed|request|api key)/i.test(cleaned)) return "";
+  return cleaned;
 }
 
 var TRANSLATE_BATCH = 10;

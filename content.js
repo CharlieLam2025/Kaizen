@@ -6,7 +6,7 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 30;
+const VB_CONTENT_REV = 34;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
@@ -1014,7 +1014,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   let liveFetchedAt = "";
   let liveZhAsked = new Set();
   let liveZhFail = new Set();
+  let liveZhFailAt = {};
   let liveZhTries = {};
+  let liveTrackAt = 0;
   let livePtrHoldT = 0;
   let liveDragging = false;
   let liveMarkLine = null;
@@ -1633,6 +1635,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   function currentLiveSeg(seconds) {
     if (!liveSegments.length) return null;
     const t = Number(seconds) || 0;
+    const firstStart = Number(liveSegments[0].start) || 0;
+    if (t + 0.05 < firstStart) {
+      liveHoldIdx = -1;
+      return null;
+    }
     let hit = liveSegments[0];
     let idx = 0;
     for (let i = 0; i < liveSegments.length; i++) {
@@ -1644,10 +1651,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (liveHoldIdx >= 0 && liveHoldIdx < liveSegments.length) {
       const cur = liveSegments[liveHoldIdx];
       const nextStart = liveSegments[liveHoldIdx + 1]?.start;
-      const holdEnd = Number(cur.end) || nextStart || cur.start + 4;
+      const holdEnd = Number(cur.end) || (Number.isFinite(nextStart) && nextStart - cur.start < 8 ? nextStart : cur.start + 4);
       if (t >= cur.start - 0.2 && t < holdEnd + 0.08) {
         return { seg: cur, idx: liveHoldIdx };
       }
+    }
+    const nextStart = liveSegments[idx + 1]?.start;
+    const end = Number(hit.end) || nextStart;
+    if (end && t > Number(end) + 0.12) {
+      liveHoldIdx = -1;
+      return null;
     }
     liveHoldIdx = idx;
     return { seg: hit, idx };
@@ -2057,6 +2070,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
   }
 
+  function liveZhBlocked(i) {
+    if (!Number.isInteger(i) || !liveZhFail.has(i)) return false;
+    const at = Number(liveZhFailAt[i]) || 0;
+    if (at && Date.now() - at >= 30000) {
+      liveZhFail.delete(i);
+      delete liveZhFailAt[i];
+      delete liveZhTries[i];
+      return false;
+    }
+    return true;
+  }
+
+  function markLiveZhFail(i) {
+    liveZhFail.add(i);
+    liveZhFailAt[i] = Date.now();
+  }
+
   function liveZhAt(i) {
     if (!Number.isInteger(i) || i < 0) return "";
     return String(liveTranslations[i] || liveTranslations[String(i)] || "").trim();
@@ -2094,7 +2124,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       for (const i of d === 0 ? [idx] : [idx - d, idx + d]) {
         if (i < 0 || i >= liveSegments.length) continue;
         const src = String(liveSegments[i]?.text || "").trim();
-        if (!src || liveZhAt(i) || liveZhAsked.has(i) || liveZhFail.has(i)) continue;
+        if (!src || liveZhAt(i) || liveZhAsked.has(i) || liveZhBlocked(i)) continue;
         if ((src.match(/[\u4e00-\u9fff]/g) || []).length >= 4) continue;
         want.push(i);
       }
@@ -2107,32 +2137,48 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         lines: want.map((i) => liveSegments[i].text),
       });
       if (!res?.ok) {
+        const fatal = /NO_KEY|401|402|钥匙|额度|欠费/i.test(`${res?.code || ""} ${res?.error || ""}`);
         want.forEach((i) => {
           liveZhAsked.delete(i);
-          liveZhTries[i] = (liveZhTries[i] || 0) + 1;
-          if (liveZhTries[i] >= 2) liveZhFail.add(i);
+          if (fatal) markLiveZhFail(i);
+          else {
+            liveZhTries[i] = (liveZhTries[i] || 0) + 1;
+            if (liveZhTries[i] >= 2) markLiveZhFail(i);
+          }
         });
+        if (fatal) {
+          const zh = document.getElementById("kz-live")?.querySelectorAll(".kz-live-pane")[liveFront]?.querySelector(".kz-live-zh");
+          if (zh) {
+            zh.textContent = liveAiError(res);
+            zh.hidden = false;
+          }
+        }
         return;
       }
       const list = res.translations || [];
       let wrote = false;
       want.forEach((i, k) => {
-        const zh = String(list[k] || "").trim();
+        const src = String(liveSegments[i]?.text || "");
+        const zh = typeof usableTranslation === "function"
+          ? usableTranslation(list[k], src)
+          : String(list[k] || "").trim();
         if (zh) {
           liveTranslations[i] = zh;
           liveZhFail.delete(i);
+          delete liveZhFailAt[i];
           delete liveZhTries[i];
           wrote = true;
         } else {
+          liveZhAsked.delete(i);
           liveZhTries[i] = (liveZhTries[i] || 0) + 1;
-          if (liveZhTries[i] >= 2) liveZhFail.add(i);
+          if (liveZhTries[i] >= 3) markLiveZhFail(i);
         }
       });
       if (wrote) persistLiveTranslations();
     } catch (_e) {
       want.forEach((i) => {
         liveZhTries[i] = (liveZhTries[i] || 0) + 1;
-        if (liveZhTries[i] >= 2) liveZhFail.add(i);
+        if (liveZhTries[i] >= 2) markLiveZhFail(i);
       });
     } finally {
       want.forEach((i) => liveZhAsked.delete(i));
@@ -2166,7 +2212,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (Number.isInteger(idx) && !liveZhAt(idx)) await translateLiveAround(idx);
     } finally {
       liveZhBusy = false;
-      if (!liveStill(id)) return;
+      if (!liveStill(id) || !Number.isInteger(idx)) return;
       livePaintKey = "";
       paintLiveBar();
     }
@@ -2190,6 +2236,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (text) en.textContent = text;
     else if (emptyHtml) en.innerHTML = emptyHtml;
+  }
+
+  function fillLiveZhPane(pane, line) {
+    if (!pane) return;
+    const zh = pane.querySelector(".kz-live-zh");
+    const en = pane.querySelector(".kz-live-en");
+    if (!zh) return;
+    if (liveMode === "zh" && en) en.style.opacity = line.zh ? "0.62" : "";
+    if (liveMode === "original") {
+      zh.textContent = "";
+      zh.hidden = true;
+      return;
+    }
+    if (line.zh) {
+      zh.textContent = line.zh;
+      zh.hidden = false;
+      return;
+    }
+    const idx = line.hit?.idx;
+    if (Number.isInteger(idx) && liveZhBlocked(idx)) {
+      zh.textContent = t("这句没翻出来");
+      zh.hidden = false;
+      return;
+    }
+    if (liveZhBusy || (Number.isInteger(idx) && liveZhAsked.has(idx))) {
+      zh.textContent = t("正在对照…");
+      zh.hidden = false;
+      return;
+    }
+    zh.textContent = "";
+    zh.hidden = true;
   }
 
   function fillLivePane(pane, line, { words = true } = {}) {
@@ -2230,7 +2307,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
     const idx = line.hit?.idx;
-    if (Number.isInteger(idx) && liveZhFail.has(idx)) {
+    if (Number.isInteger(idx) && liveZhBlocked(idx)) {
       zh.textContent = t("这句没翻出来");
       zh.hidden = false;
       return;
@@ -2337,11 +2414,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const line = liveLineAt(pageVideo()?.currentTime || 0);
     if (liveMode !== "original" && !line.zh) {
       const idx = line.hit?.idx;
-      if (!Number.isInteger(idx) || (!liveZhFail.has(idx) && !liveZhAsked.has(idx) && !liveZhBusy)) fillLiveZh();
+      if (Number.isInteger(idx) && !liveZhBlocked(idx) && !liveZhAsked.has(idx) && !liveZhBusy) fillLiveZh();
     }
     const contentKey = `${line.hit?.idx ?? -1}\n${line.text}\n${liveMode}`;
     const wordsKey = `${contentKey}\n${liveVocab.size}\n${[...liveMarks].join(",")}`;
-    const zhKey = `${line.zh}\n${liveZhBusy}\n${Number.isInteger(line.hit?.idx) && liveZhFail.has(line.hit.idx)}`;
+    const zhKey = `${line.zh}\n${liveZhBusy}\n${Number.isInteger(line.hit?.idx) && liveZhBlocked(line.hit.idx)}`;
     const paintKey = `${wordsKey}\n${zhKey}`;
     const existing = document.getElementById("kz-live");
     const geomDirty = !liveGeom;
@@ -2359,9 +2436,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!panes.length) return;
     const rewriteWords = wordsKey !== liveWordsKey;
     if (busy) {
-      fillLivePane(panes[liveFront], line, { words: false });
-      liveContentKey = contentKey;
-      liveWordsKey = "";
+      fillLiveZhPane(panes[liveFront], line);
       livePaintKey = paintKey;
       return;
     }
@@ -2380,14 +2455,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const prev = panes[liveFront];
       fillLivePane(panes[next], line, { words: true });
       panes[next]?.classList.add("on");
+      prev?.classList.remove("on");
       liveFront = next;
-      livePaneFade = setTimeout(() => {
-        livePaneFade = 0;
-        const front = document.getElementById("kz-live")?.querySelectorAll(".kz-live-pane")[liveFront];
-        if (prev && prev !== front) prev.classList.remove("on");
-      }, 180);
+    } else if (rewriteWords) {
+      fillLivePane(panes[liveFront], line, { words: true });
     } else {
-      fillLivePane(panes[liveFront], line, { words: rewriteWords });
+      fillLiveZhPane(panes[liveFront], line);
     }
     liveContentKey = contentKey;
     liveWordsKey = wordsKey;
@@ -2402,42 +2475,91 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return `${segs.length}|${a?.start}|${String(a?.text || "").slice(0, 16)}|${m?.start}|${String(m?.text || "").slice(0, 16)}|${b?.start}|${String(b?.text || "").slice(0, 16)}`;
   }
 
-  function pickLiveSegs(live, pack) {
+  function pickLiveTrack(live, pack) {
     const a = live?.segments?.length ? live.segments : null;
     const b = pack?.segments?.length ? pack.segments : null;
-    if (!a) return b || [];
-    if (!b) return a;
-    if (liveSegFinger(a) === liveSegFinger(b)) return a;
+    if (!a) return { segs: b || [], translations: pack?.translations || null, savedAt: Number(pack?.savedAt) || 0 };
+    if (!b) return { segs: a, translations: null, savedAt: Number(live?.savedAt) || 0 };
+    if (liveSegFinger(a) === liveSegFinger(b)) {
+      return {
+        segs: a,
+        translations: pack?.translations || null,
+        savedAt: Math.max(Number(live?.savedAt) || 0, Number(pack?.savedAt) || 0),
+      };
+    }
     const tLive = Number(live?.savedAt) || 0;
     const tPack = Number(pack?.savedAt) || 0;
-    if (tLive && tPack && tLive !== tPack) return tLive > tPack ? a : b;
-    return a.length >= b.length ? a : b;
+    if (tLive !== tPack) {
+      return tLive > tPack
+        ? { segs: a, translations: null, savedAt: tLive }
+        : { segs: b, translations: pack?.translations || null, savedAt: tPack };
+    }
+    return a.length >= b.length
+      ? { segs: a, translations: null, savedAt: tLive }
+      : { segs: b, translations: pack?.translations || null, savedAt: tPack };
   }
 
-  function applyLiveSegs(id, segs) {
-    liveSegments = segs || [];
+  function pickLiveSegs(live, pack) {
+    return pickLiveTrack(live, pack).segs;
+  }
+
+  function bumpLiveSegGen() {
+    return (ensureLiveSegments._gen = (ensureLiveSegments._gen || 0) + 1);
+  }
+
+  function applyLiveSegs(id, segs, translations) {
+    const next = segs || [];
+    const same = liveSegId === id && liveSegFinger(liveSegments) === liveSegFinger(next);
+    liveSegments = next;
     liveSegId = id;
     liveHoldIdx = -1;
     liveContentKey = "";
     liveWordsKey = "";
     livePaintKey = "";
+    if (!same) {
+      liveTranslations = translations ? { ...translations } : {};
+      liveZhAsked = new Set();
+      liveZhFail = new Set();
+      liveZhFailAt = {};
+      liveZhTries = {};
+    } else if (translations) {
+      liveTranslations = { ...liveTranslations, ...translations };
+    }
+  }
+
+  function adoptLiveTrack(id, track) {
+    const segs = track?.segs || [];
+    if (!id || !liveStill(id) || !segs.length) return false;
+    const same = liveSegId === id && liveSegFinger(liveSegments) === liveSegFinger(segs);
+    if (same) {
+      if (track.translations) liveTranslations = { ...liveTranslations, ...track.translations };
+      return false;
+    }
+    const nextAt = Number(track.savedAt) || 0;
+    if (liveSegId === id && liveSegments.length && liveTrackAt && nextAt > 0 && nextAt < liveTrackAt) return false;
+    applyLiveSegs(id, segs, track.translations);
+    liveTrackAt = nextAt || Date.now();
+    bumpLiveSegGen();
+    return true;
   }
 
   async function ensureLiveSegments() {
     const id = videoIdFromUrl(location.href);
     if (!id) return [];
     if (liveSegId === id && liveSegments.length) return liveSegments;
-    const gen = (ensureLiveSegments._gen = (ensureLiveSegments._gen || 0) + 1);
+    const gen = bumpLiveSegGen();
     try {
       const cached = await chrome.storage.local.get([`vb_cache_${id}`, "vb_live"]);
       if (gen !== ensureLiveSegments._gen || !liveStill(id)) return liveSegments;
       const pack = cached[`vb_cache_${id}`];
       const live = cached.vb_live?.videoId === id ? cached.vb_live : null;
-      const segs = pickLiveSegs(live, pack);
-      if (liveSegId && liveSegId !== id) liveTranslations = {};
-      if (pack?.translations) liveTranslations = { ...liveTranslations, ...pack.translations };
-      if (segs?.length) {
-        applyLiveSegs(id, segs);
+      const track = pickLiveTrack(live, pack);
+      if (liveSegId && liveSegId !== id) {
+        liveTranslations = {};
+        liveTrackAt = 0;
+      }
+      if (track.segs.length) {
+        adoptLiveTrack(id, track);
         if (liveMode !== "original") fillLiveZh();
         return liveSegments;
       }
@@ -2445,12 +2567,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       const data = await getTranscript(id);
       if (gen !== ensureLiveSegments._gen || !liveStill(id)) return liveSegments;
-      applyLiveSegs(id, data.segments || []);
+      applyLiveSegs(id, data.segments || [], data.translations);
       liveFetchedAt = id;
-      if (data.translations && Object.keys(data.translations).length) {
-        liveTranslations = { ...data.translations, ...liveTranslations };
-        persistLiveTranslations();
-      }
+      liveTrackAt = Date.now();
+      if (data.translations && Object.keys(data.translations).length) persistLiveTranslations();
     } catch (_e) {
       if (!liveSegments.length) liveSegments = [];
     }
@@ -2677,9 +2797,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     liveSegId = "";
     liveSegments = [];
     liveTranslations = {};
+    liveTrackAt = 0;
     liveFetchedAt = "";
     liveZhAsked = new Set();
     liveZhFail = new Set();
+    liveZhFailAt = {};
     liveZhTries = {};
     liveZhBusy = false;
     liveWord = "";
@@ -2754,27 +2876,40 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (changes.vb_vocab || changes.vb_settings) loadLiveCcState();
     if (changes.vb_highlights) {
       loadLiveMarks(changes.vb_highlights.newValue, videoIdFromUrl(location.href));
-      livePaintKey = "";
-      if (liveCcOn) paintLiveBar();
+      paintLiveWordFlags();
+      if (liveCcOn) {
+        const line = liveLineAt(pageVideo()?.currentTime || 0);
+        const contentKey = `${line.hit?.idx ?? -1}\n${line.text}\n${liveMode}`;
+        const wordsKey = `${contentKey}\n${liveVocab.size}\n${[...liveMarks].join(",")}`;
+        const zhKey = `${line.zh}\n${liveZhBusy}\n${Number.isInteger(line.hit?.idx) && liveZhBlocked(line.hit.idx)}`;
+        liveWordsKey = wordsKey;
+        livePaintKey = `${wordsKey}\n${zhKey}`;
+      }
     }
     const cacheChanged = Boolean(changes.vb_live) || Object.keys(changes).some((key) => key.startsWith("vb_cache_"));
     if (cacheChanged) {
       const id = videoIdFromUrl(location.href);
       chrome.storage.local.get([id ? `vb_cache_${id}` : "", "vb_live"], (stored) => {
+        if (id && !liveStill(id)) return;
         const pack = id ? stored[`vb_cache_${id}`] : null;
         const live = stored.vb_live?.videoId === id ? stored.vb_live : null;
-        const segs = pickLiveSegs(live, pack);
-        if (liveSegId && liveSegId !== id) liveTranslations = {};
-        if (pack?.translations) liveTranslations = { ...liveTranslations, ...pack.translations };
-        const same = liveSegId === id && liveSegFinger(liveSegments) === liveSegFinger(segs);
-        if (!same && segs.length) {
-          applyLiveSegs(id, segs);
-        } else if (!segs.length && liveSegId === id) {
+        const track = pickLiveTrack(live, pack);
+        if (liveSegId && liveSegId !== id) {
+          liveTranslations = {};
+          liveTrackAt = 0;
+        }
+        const same = liveSegId === id && liveSegFinger(liveSegments) === liveSegFinger(track.segs);
+        if (adoptLiveTrack(id, track)) {
+          if (liveCcOn) paintLiveBar();
+        } else if (!track.segs.length && liveSegId === id) {
           resetLiveTrack();
           if (liveCcOn) ensureLiveSegments().then(() => paintLiveBar());
+        } else if (same && liveCcOn) {
+          fillLiveZhPane(
+            document.getElementById("kz-live")?.querySelectorAll(".kz-live-pane")[liveFront],
+            liveLineAt(pageVideo()?.currentTime || 0),
+          );
         }
-        livePaintKey = "";
-        if (liveCcOn) paintLiveBar();
       });
     }
     if (

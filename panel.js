@@ -187,6 +187,7 @@ let lastInjectAt = 0;
 let injectingContent = false;
 let watchTabCache = { at: 0, tab: null };
 let saveCacheTimer = 0;
+let saveProgressTimer = 0;
 let quoteRailOpen = false;
 let brickMoreOpen = -1;
 let vocabCardIndex = 0;
@@ -355,6 +356,11 @@ function isRealTranslation(zh, en) {
   return translationKind(zh, en) === "ok";
 }
 
+function isTranslateFatal(result) {
+  const text = `${result?.code || ""} ${result?.error || ""}`;
+  return result?.code === "NO_KEY" || /NO_KEY|401|402|钥匙|额度|欠费|429|网络|Failed to fetch|AI 请求失败/i.test(text);
+}
+
 function translationAt(i) {
   const cleaned = cleanZh(state.translations[i]);
   if (!isRealTranslation(cleaned, state.segments[i]?.text)) return "";
@@ -373,16 +379,16 @@ function sendToBg(message) {
   return chrome.runtime.sendMessage(message);
 }
 
-function sendToTab(message) {
+function sendToTab(message, tabId = state.tabId) {
   return new Promise((resolve) => {
-    if (!state.tabId) return resolve(null);
+    if (!tabId) return resolve(null);
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       resolve(null);
     }, 800);
-    chrome.tabs.sendMessage(state.tabId, message, (response) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -392,13 +398,13 @@ function sendToTab(message) {
   });
 }
 
-async function sendToTabSure(message) {
-  let res = await sendToTab(message);
+async function sendToTabSure(message, tabId = state.tabId) {
+  let res = await sendToTab(message, tabId);
   if (res) return res;
   contentReadyAt = 0;
   lastInjectAt = 0;
-  if (state.tabId) await ensureContentScript(state.tabId, { skipPing: true });
-  res = await sendToTab(message);
+  if (tabId) await ensureContentScript(tabId, { skipPing: true });
+  res = await sendToTab(message, tabId);
   if (!res) {
     const now = Date.now();
     if (now - (sendToTabSure._hintAt || 0) > 4000) {
@@ -750,10 +756,43 @@ function resetTranscriptCaches() {
 
 function saveCacheSoon(ms = 1000) {
   clearTimeout(saveCacheTimer);
+  clearTimeout(saveProgressTimer);
+  saveProgressTimer = 0;
   saveCacheTimer = setTimeout(() => {
     saveCacheTimer = 0;
     saveCache();
   }, ms);
+}
+
+function saveProgressSoon(ms = 4000) {
+  if (saveCacheTimer) return;
+  clearTimeout(saveProgressTimer);
+  saveProgressTimer = setTimeout(() => {
+    saveProgressTimer = 0;
+    saveProgress();
+  }, ms);
+}
+
+async function saveProgress() {
+  if (!state.videoId) return;
+  const key = `vb_cache_${state.videoId}`;
+  try {
+    const stored = await chrome.storage.local.get(key);
+    const pack = stored[key];
+    if (pack && typeof pack === "object") {
+      await chrome.storage.local.set({
+        [key]: { ...pack, lastSeconds: state.lastSeconds },
+      });
+    }
+    const slot = shelf.find((x) => x.videoId === state.videoId);
+    if (slot) {
+      slot.lastSeconds = state.lastSeconds;
+      slot.updatedAt = Date.now();
+      await saveList("vb_shelf", shelf);
+    }
+  } catch (_e) {
+    /* ignore */
+  }
 }
 
 function scrollToSeconds(seconds) {
@@ -789,17 +828,17 @@ async function followTick() {
 }
 
 function applyPlayhead(info) {
-  if (Date.now() < selectingUntil) return;
   if (info?.ad) return;
   if (!Number.isFinite(info?.currentTime)) return;
   if (state.tabId && info.tabId && Number(info.tabId) !== Number(state.tabId)) return;
   if (state.videoId && info.videoId !== state.videoId) return;
+  const selecting = Boolean($("selBar") && !$("selBar").hidden);
   lastPlayheadAt = Date.now();
   state.lastSeconds = info.currentTime;
-  saveCacheSoon(6000);
+  saveProgressSoon(4000);
   paintMarkWalker(info.currentTime);
   const active = paintPlayingRow(info.currentTime);
-  if (!followPlayback || !active || !isReadView()) return;
+  if (selecting || !followPlayback || !active || !isReadView()) return;
   if (followPausedByUser) {
     if (isRowNearCenter(active, 80)) followPausedByUser = false;
     else return;
@@ -979,7 +1018,7 @@ let pendingWatchInfo = null;
 
 function markWatchStage(stage, extra = {}) {
   chrome.storage.local
-    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.8", ...extra } })
+    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.9", ...extra } })
     .catch(() => {});
 }
 
@@ -1007,7 +1046,10 @@ function takeIncomingWatch(info) {
   if (decision === "keep") {
     if (
       next.tabId &&
-      (!state.tabId || Number(next.tabId) === Number(state.tabId) || next.source === "user")
+      (!state.tabId ||
+        Number(next.tabId) === Number(state.tabId) ||
+        next.source === "user" ||
+        next.activeWatch)
     ) {
       state.tabId = next.tabId;
     }
@@ -1018,7 +1060,14 @@ function takeIncomingWatch(info) {
   }
   if (decision !== "open") return;
   if (next.source !== "user" && !next.force) {
-    if (videoId === transcriptFailId && Date.now() - transcriptFailAt < 20000) return;
+    if (
+      videoId === transcriptFailId &&
+      Date.now() - transcriptFailAt < 20000 &&
+      !next.activeWatch &&
+      !(next.tabId && state.tabId && Number(next.tabId) !== Number(state.tabId))
+    ) {
+      return;
+    }
   }
   if (next.tabId) state.tabId = next.tabId;
   markWatchStage("loading", { videoId, tabId: state.tabId, source: next.source || "" });
@@ -1046,6 +1095,7 @@ function clearOpenedVideo(reason) {
   });
   transcriptFailId = "";
   transcriptFailAt = 0;
+  autoOpenKey = "";
   markWatchStage("cleared", { reason: String(reason || "").slice(0, 120) });
   showStateBox("K", t("这页没有可读视频"), reason || t("换到一支能播的 YouTube 或 B 站，或把链接贴在下面。"), false, true);
 }
@@ -1110,6 +1160,7 @@ async function adoptActiveWatchNow() {
   try {
     const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (active && isWatchHost(tabHref(active)) && !videoIdFromHref(tabHref(active))) {
+      if (state.videoId && state.segments.length) return false;
       takeIncomingWatch({
         title: active.title || "",
         tabId: active.id,
@@ -3551,6 +3602,8 @@ async function loadResumeHint() {
 }
 
 async function saveCache() {
+  clearTimeout(saveProgressTimer);
+  saveProgressTimer = 0;
   if (!state.videoId) return;
   const key = `vb_cache_${state.videoId}`;
   const savedAt = Date.now();
@@ -4643,6 +4696,11 @@ function paintOpenedVideo() {
   applyPlayRate(playbackRate, false);
   queueBackgroundWork(videoId);
   flushPendingHotkey();
+  if (state.tabId) {
+    void sendToTabSure({ type: "VB_VIDEO_INFO" }).then((info) => {
+      if (info && state.videoId === videoId) applyPlayhead(info);
+    });
+  }
 }
 
 async function loadVideo(videoId, tabTitle = "", opts = {}) {
@@ -4654,6 +4712,7 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
         chrome.storage.local.get("vb_live"),
       ]);
       const live = liveStore.vb_live?.videoId === videoId ? liveStore.vb_live : null;
+      if (state.videoId !== videoId) return;
       const incomingAt = Math.max(Number(live?.savedAt) || 0, Number(cached?.savedAt) || 0);
       if (!incomingAt || incomingAt <= (Number(state._trackAt) || 0)) {
         if ($("mainBox")?.hidden && $("setupGate")?.hidden && !isSettingsOpen()) showMain();
@@ -4670,6 +4729,17 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
   videoJob += 1;
   const job = videoJob;
   loadingVideoId = videoId;
+  if (state.videoId && state.videoId !== videoId) {
+    resetTranscriptCaches();
+    state.videoId = videoId;
+    state.title = tabTitle || "";
+    state.segments = [];
+    state.translations = {};
+    state.lastSeconds = 0;
+    state.translateFailed = {};
+    state.translateTries = {};
+    lastFollowedStart = -1;
+  }
   isTranslating = false;
   if (typeof translateAll === "function") translateAll.busy = false;
   clearQueuedWork();
@@ -4695,6 +4765,7 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
       if (liveAt && cacheAt && liveAt !== cacheAt) return liveAt > cacheAt ? a : b;
       return a.length >= b.length ? a : b;
     })();
+    if (job !== videoJob || loadingVideoId !== videoId) return;
     if (segs?.length) {
       hydrateVideoState(
         videoId,
@@ -4719,6 +4790,7 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     if (!result?.ok) {
       transcriptFailId = videoId;
       transcriptFailAt = Date.now();
+      autoOpenKey = "";
       markWatchStage("caption-error", { videoId, error: String(result?.error || "").slice(0, 240) });
       showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(result?.error), true, true);
       return;
@@ -4734,6 +4806,7 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
     if (job !== videoJob || loadingVideoId !== videoId) return;
     transcriptFailId = videoId;
     transcriptFailAt = Date.now();
+    autoOpenKey = "";
     markWatchStage("caption-error", { videoId, error: String(error?.message || error).slice(0, 240) });
     showStateBox("K", t("暂时读不到字幕"), friendlyTranscriptError(error?.message || error), true, true);
   } finally {
@@ -8750,10 +8823,12 @@ function renderTranscript(opts = {}) {
   let step = 0;
   let done = 0;
 
+  let needFollow = false;
   const hydrateOne = (i) => {
     const old = rows[i];
     if (!old?.classList.contains("t-skel")) return;
     const fresh = buildTranscriptRow(i, ctx);
+    if (playingRowEl === old || i === segmentIndexAt(state.lastSeconds)) needFollow = true;
     old.replaceWith(fresh);
     rows[i] = fresh;
     transcriptRows[i] = fresh;
@@ -8771,6 +8846,8 @@ function renderTranscript(opts = {}) {
       budget -= 1;
     }
     paintPlayingRow(state.lastSeconds);
+    if (needFollow) lastFollowedStart = -1;
+    needFollow = false;
     if (done < n) requestAnimationFrame(() => pump(28));
     else finishTranscriptPaint(gen);
   };
@@ -8801,14 +8878,19 @@ async function translateAll() {
         pending.push(i);
       }
       if (!pending.length) break;
-      const result = await sendToBg({
-        action: "vbTranslate",
-        lines: pending.map((i) => state.segments[i].text),
-      });
+      let result;
+      try {
+        result = await sendToBg({
+          action: "vbTranslate",
+          lines: pending.map((i) => state.segments[i].text),
+        });
+      } catch (e) {
+        result = { ok: false, error: e?.message || "message failed" };
+      }
       if (job !== videoJob || state.videoId !== videoId) break;
       if (!result?.ok) {
         batchFails += 1;
-        const fatal = /NO_KEY|401|402|钥匙|额度|欠费/i.test(result?.error || "");
+        const fatal = isTranslateFatal(result);
         pending.forEach((i) => {
           state.translateTries[i] = (state.translateTries[i] || 0) + 1;
           if (fatal || state.translateTries[i] >= 2) {
@@ -8817,21 +8899,26 @@ async function translateAll() {
           }
           patchRowTranslation(i);
         });
-        if (fatal || batchFails >= 3) {
+        if (fatal) {
           flashHint(friendlyAiError(result?.error, t("这批没翻出来，点重试。")));
           break;
+        }
+        if (batchFails === 1 || batchFails % 3 === 0) {
+          flashHint(friendlyAiError(result?.error, t("这批没翻出来，点重试。")));
         }
         await new Promise((ok) => setTimeout(ok, 900));
         continue;
       }
-      batchFails = 0;
+      let got = 0;
       pending.forEach((i, k) => {
-        const zh = cleanZh(result.translations[k] || "");
-        const kind = translationKind(zh, state.segments[i]?.text);
-        if (kind === "ok") {
+        const zh = typeof usableTranslation === "function"
+          ? usableTranslation(result.translations[k], state.segments[i]?.text)
+          : cleanZh(result.translations[k] || "");
+        if (zh) {
           state.translations[i] = zh;
           delete state.translateFailed[i];
           delete state.translateTries[i];
+          got += 1;
         } else {
           delete state.translations[i];
           state.translateTries[i] = (state.translateTries[i] || 0) + 1;
@@ -8839,6 +8926,14 @@ async function translateAll() {
         }
         patchRowTranslation(i);
       });
+      if (!got) {
+        batchFails += 1;
+        if (batchFails === 1 || batchFails % 3 === 0) {
+          flashHint(t("这批没翻出来，点重试。"));
+        }
+      } else {
+        batchFails = 0;
+      }
       renderTranslateBar();
       backfillHandQuoteZh();
       await new Promise((ok) => setTimeout(ok, 220));
@@ -8848,7 +8943,7 @@ async function translateAll() {
     isTranslating = false;
     if (job === videoJob && state.videoId === videoId) {
       renderTranslateBar();
-      saveCache();
+      saveCacheSoon(1500);
     }
   }
 }
@@ -12177,9 +12272,9 @@ async function pollTickWork() {
   const watchPage = isWatchHost(tabHref(tab));
   const ready = await ensureContentScript(tab.id);
   if (isLooping() && ready) applyLoopToPage();
-  const info = ready ? (await sendToTab({ type: "VB_VIDEO_INFO" })) || {} : {};
+  const info = ready ? (await sendToTab({ type: "VB_VIDEO_INFO" }, tab.id)) || {} : {};
   if (ready && Number(info.rate) > 0 && Math.abs(Number(info.rate) - playbackRate) > 0.04) {
-    sendToTab({ type: "VB_RATE", rate: playbackRate });
+    sendToTab({ type: "VB_RATE", rate: playbackRate }, tab.id);
   }
   if (info.unavailable) {
     takeIncomingWatch({
@@ -12198,6 +12293,7 @@ async function pollTickWork() {
     pickPollVideoId(hrefId, info) || (await withTimeout(probePageVideoId(tab.id), 800));
   if (!videoId) {
     if (watchPage && tab.active) {
+      if (state.videoId && state.segments.length) return;
       takeIncomingWatch({
         title: info.title || tab.title || "",
         tabId: tab.id,
@@ -12223,7 +12319,7 @@ async function pollTickWork() {
   });
   if (videoId !== state.videoId) return;
   if (Number.isFinite(info.currentTime)) {
-    state.lastSeconds = info.currentTime;
+    applyPlayhead({ ...info, tabId: tab.id, videoId });
   }
 }
 

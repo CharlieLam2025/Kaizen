@@ -2064,6 +2064,7 @@ svg.arg-map {
   cursor: default;
   border-left: 2px solid transparent;
   contain: layout style;
+  overflow-anchor: none;
 }
 
 .t-row.t-skel {
@@ -2082,6 +2083,7 @@ svg.arg-map {
 .t-row.playing {
   border-left-color: var(--accent);
   background: rgba(196, 71, 45, 0.06);
+  overflow-anchor: auto;
 }
 .t-row.flash { background: var(--mark); }
 
