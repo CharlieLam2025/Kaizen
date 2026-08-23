@@ -212,7 +212,7 @@ function usableTranslation(zh, en) {
   return cleaned;
 }
 
-var TRANSLATE_BATCH = 10;
+var TRANSLATE_BATCH = 6;
 
 function watchUrl(videoId, seconds) {
   const s = Math.max(0, Math.floor(Number(seconds) || 0));

@@ -186,9 +186,14 @@ chrome.commands.onCommand.addListener((command) => {
 
 const followPorts = new Set();
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "kaizen-follow") return;
-  followPorts.add(port);
-  port.onDisconnect.addListener(() => followPorts.delete(port));
+  if (port.name === "kaizen-follow") {
+    followPorts.add(port);
+    port.onDisconnect.addListener(() => followPorts.delete(port));
+    return;
+  }
+  if (port.name === "kaizen-ai") {
+    port.onDisconnect.addListener(() => {});
+  }
 });
 
 const DEFAULT_SETTINGS = {
@@ -310,7 +315,34 @@ function pickAiText(data, { json = false, allowReasoning = false } = {}) {
   return String(msg.reasoning_content || msg.reasoning || "").trim();
 }
 
-async function callAi({
+let aiChain = Promise.resolve();
+let aiBusy = 0;
+let aiPulse = 0;
+
+function beginAi() {
+  aiBusy += 1;
+  chrome.storage.local.set({ vb_ai_busy: Date.now() }).catch(() => {});
+  if (!aiPulse) aiPulse = setInterval(() => {}, 15000);
+}
+
+function endAi() {
+  aiBusy = Math.max(0, aiBusy - 1);
+  if (aiBusy) return;
+  if (aiPulse) {
+    clearInterval(aiPulse);
+    aiPulse = 0;
+  }
+  chrome.storage.local.set({ vb_ai_busy: 0 }).catch(() => {});
+}
+
+function callAi(opts) {
+  if (opts?._inner) return callAiOnce(opts);
+  const next = aiChain.then(() => callAiOnce({ ...opts, _inner: true }));
+  aiChain = next.then(() => {}, () => {});
+  return next;
+}
+
+async function callAiOnce({
   system,
   messages,
   json = false,
@@ -323,7 +355,10 @@ async function callAi({
   _retriedJson = false,
   _retriedLength = false,
   _retried429 = 0,
+  _retriedTimeout = 0,
 }) {
+  beginAi();
+  try {
   const settings = await getSettings();
   setUiLang(settings.uiLang);
   if (!settings.apiKey) {
@@ -333,56 +368,58 @@ async function callAi({
   }
 
   const thinkingOn = think === true && !_plain;
-  const res = await fetch(`${settings.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${settings.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: model || settings.model || "deepseek-v4-flash",
-      max_tokens: thinkingOn ? Math.max(maxTokens, 8192) : maxTokens,
-      ...(!_plain ? { thinking: { type: thinkingOn ? "enabled" : "disabled" } } : {}),
-      ...(!thinkingOn && Number.isFinite(temperature) ? { temperature } : {}),
-      ...(json ? { response_format: { type: "json_object" } } : {}),
-      messages: [{ role: "system", content: `${system}${aiLangLine(settings.uiLang)}` }, ...messages],
-    }),
-  });
+  const again = (extra) =>
+    callAiOnce({
+      system,
+      messages,
+      json,
+      maxTokens,
+      model,
+      temperature,
+      think,
+      _retried,
+      _plain,
+      _retriedJson,
+      _retriedLength,
+      _retried429,
+      _retriedTimeout,
+      _inner: true,
+      ...extra,
+    });
+  let res;
+  try {
+    res = await fetch(`${settings.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      signal: AbortSignal.timeout(90000),
+      body: JSON.stringify({
+        model: model || settings.model || "deepseek-v4-flash",
+        max_tokens: thinkingOn ? Math.max(maxTokens, 8192) : maxTokens,
+        ...(!_plain ? { thinking: { type: thinkingOn ? "enabled" : "disabled" } } : {}),
+        ...(!thinkingOn && Number.isFinite(temperature) ? { temperature } : {}),
+        ...(json ? { response_format: { type: "json_object" } } : {}),
+        messages: [{ role: "system", content: `${system}${aiLangLine(settings.uiLang)}` }, ...messages],
+      }),
+    });
+  } catch (e) {
+    if (_retriedTimeout < 2 && /timeout|abort|Failed to fetch|network/i.test(String(e?.name || e?.message || e))) {
+      await new Promise((ok) => setTimeout(ok, 1200 * (_retriedTimeout + 1)));
+      return again({ _retriedTimeout: _retriedTimeout + 1 });
+    }
+    throw e;
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    if (res.status === 429 && _retried429 < 3) {
-      await new Promise((ok) => setTimeout(ok, 1200 * (_retried429 + 1)));
-      return callAi({
-        system,
-        messages,
-        json,
-        maxTokens,
-        model,
-        temperature,
-        think,
-        _retried,
-        _plain,
-        _retriedJson,
-        _retriedLength,
-        _retried429: _retried429 + 1,
-      });
+    if (res.status === 429 && _retried429 < 5) {
+      await new Promise((ok) => setTimeout(ok, 2000 * (_retried429 + 1)));
+      return again({ _retried429: _retried429 + 1 });
     }
     if (!_plain && res.status === 400) {
-      return callAi({
-        system,
-        messages,
-        json,
-        maxTokens,
-        model,
-        temperature,
-        think: false,
-        _retried: true,
-        _plain: true,
-        _retriedJson,
-        _retriedLength,
-        _retried429,
-      });
+      return again({ think: false, _retried: true, _plain: true });
     }
     throw new Error(`AI 请求失败（${res.status}）${body.slice(0, 200)}`);
   }
@@ -391,38 +428,20 @@ async function callAi({
   if (text) return text;
   const reason = data?.choices?.[0]?.finish_reason || "";
   if (json && !_retriedJson) {
-    return callAi({
-      system,
-      messages,
-      json: false,
-      maxTokens: Math.max(maxTokens, 2048),
-      model,
-      temperature,
-      think: false,
-      _retried,
-      _plain,
-      _retriedJson: true,
-      _retriedLength,
-      _retried429,
-    });
+    return again({ json: false, maxTokens: Math.max(maxTokens, 2048), think: false, _retriedJson: true });
   }
   if ((thinkingOn || reason === "length") && !_retriedLength) {
-    return callAi({
-      system,
-      messages,
+    return again({
       json: false,
       maxTokens: Math.max(maxTokens * 2, 4096),
-      model,
-      temperature,
       think: false,
-      _retried,
-      _plain,
-      _retriedJson,
       _retriedLength: true,
-      _retried429,
     });
   }
   throw new Error(reason === "length" ? "回答被截断了，再试一次。" : "AI 返回为空");
+  } finally {
+    endAi();
+  }
 }
 
 // ---------- helpers ----------
@@ -847,7 +866,7 @@ async function translateChunk(src, settings) {
       raw = await run(false);
       out = src.map((line, i) => polishTranslateLine(raw[i], line));
     } catch (e) {
-      if (isRethrowTranslateError(e)) throw e;
+      if (!out.some(Boolean) && isRethrowTranslateError(e)) throw e;
     }
   }
   const still = out.map((zh, i) => (zh ? -1 : i)).filter((i) => i >= 0);
@@ -867,7 +886,7 @@ async function translateChunk(src, settings) {
         if (zh) out[i] = zh;
       });
     } catch (e) {
-      if (isRethrowTranslateError(e)) throw e;
+      if (!out.some(Boolean) && isRethrowTranslateError(e)) throw e;
     }
   }
   return out;
@@ -877,7 +896,7 @@ async function handleTranslate({ lines }) {
   const settings = await getSettings();
   const src = (Array.isArray(lines) ? lines : []).slice(0, 40).map((line) => String(line).slice(0, 500));
   if (!src.length) return { translations: [] };
-  const size = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 10;
+  const size = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 6;
   const out = [];
   for (let i = 0; i < src.length; i += size) {
     const chunk = src.slice(i, i + size);

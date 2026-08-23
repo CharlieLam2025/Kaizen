@@ -6,7 +6,7 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 34;
+const VB_CONTENT_REV = 36;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
@@ -2120,7 +2120,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   async function translateLiveAround(idx) {
     if (!Number.isInteger(idx) || liveMode === "original") return;
     const want = [];
-    for (let d = 0; d <= 5 && want.length < 8; d++) {
+    for (let d = 0; d <= 3 && want.length < 4; d++) {
       for (const i of d === 0 ? [idx] : [idx - d, idx + d]) {
         if (i < 0 || i >= liveSegments.length) continue;
         const src = String(liveSegments[i]?.text || "").trim();
@@ -2130,6 +2130,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
     }
     if (!want.length) return;
+    try {
+      const stored = await chrome.storage.local.get("vb_ai_busy");
+      const busyAt = Number(stored?.vb_ai_busy || 0);
+      if (busyAt && Date.now() - busyAt < 120000) return;
+    } catch (_e) {}
     want.forEach((i) => liveZhAsked.add(i));
     try {
       const res = await chrome.runtime.sendMessage({
@@ -2137,7 +2142,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         lines: want.map((i) => liveSegments[i].text),
       });
       if (!res?.ok) {
-        const fatal = /NO_KEY|401|402|钥匙|额度|欠费/i.test(`${res?.code || ""} ${res?.error || ""}`);
+        const errText = `${res?.code || ""} ${res?.error || ""}`;
+        if (!res || /port closed|invalidated|receiving end|Could not establish|message failed/i.test(errText)) return;
+        const fatal = /NO_KEY|401|402|钥匙|额度|欠费/i.test(errText);
         want.forEach((i) => {
           liveZhAsked.delete(i);
           if (fatal) markLiveZhFail(i);
@@ -2176,6 +2183,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       if (wrote) persistLiveTranslations();
     } catch (_e) {
+      if (/port closed|invalidated|receiving end|Could not establish|message failed/i.test(String(_e?.message || _e))) return;
       want.forEach((i) => {
         liveZhTries[i] = (liveZhTries[i] || 0) + 1;
         if (liveZhTries[i] >= 2) markLiveZhFail(i);
