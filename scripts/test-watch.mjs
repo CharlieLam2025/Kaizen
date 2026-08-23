@@ -215,7 +215,7 @@ assert.match(markFaceUrl("cat"), /mark-cat-golden/);
 assert.match(markFaceUrl("dog"), /mark-dog-samoyed/);
 assert.equal(markFaceUrl("ribbon"), "");
 assert.match(content, /document\.body\.appendChild\(next\)/, "K 条要挂在页面上，不能埋进播放器图层");
-assert.match(content, /VB_CONTENT_REV = 34/, "重载后要升 rev，才能重装 K");
+assert.match(content, /VB_CONTENT_REV = 36/, "重载后要升 rev，才能重装 K");
 assert.doesNotMatch(content, /data-mode="original"/, "字幕语言不要堆在片子上反复点");
 assert.match(content, /liveModeOf\(stored\.vb_settings\?\.transcriptMode\)/, "片上字幕要跟侧栏记住的双语");
 assert.match(content, /function bindLivePointerGuard/, "片子上要点得着，先在页面上拦住播放器");
@@ -257,7 +257,7 @@ assert.match(content, /liveSegFinger\(a\) === liveSegFinger\(b\)/, "只写译文
 assert.match(content, /wasFs === nowFs/, "B 站 class 抖一下不能重放条子");
 assert.match(content, /bpx-state-web-fullscreen/, "B 站网页全屏要跟进条子");
 assert.match(panel, /translateAll\.busy/, "快切视频时漏翻的翻译要能再进");
-assert.equal(TRANSLATE_BATCH, 10, "侧栏和后台要同一批大小");
+assert.equal(TRANSLATE_BATCH, 6, "侧栏和后台要同一批大小");
 assert.match(panel, /pending.length < batch/, "DeepSeek 一次不要塞 40 句");
 assert.match(panel, /translateTries/, "空译文要再试一次，不能立刻钉死");
 assert.match(bg, /function translateChunk/, "多句要按块翻，不能只切前 12 条把后面钉死");
@@ -265,9 +265,14 @@ assert.match(bg, /missing.length === src.length/, "整块都空要再翻一次")
 assert.match(bg, /_retriedJson/, "JSON 空了和截断要分开重试");
 assert.match(bg, /pickAiText\(data, \{ json \}\)/, "JSON 任务不能把思维链当译文解析");
 assert.match(bg, /json \|\| !allowReasoning/, "翻译和 JSON 都不能把思维链当正文");
-assert.match(bg, /_retried429 < 3/, "429 要多歇几次，不能只问一次");
+assert.match(bg, /_retried429 < 5/, "429 要多歇几次，不能只问一次");
 assert.match(bg, /raw = \[\]/, "plain 回退再抛也不能把整批打成失败");
 assert.match(bg, /function isRethrowTranslateError/, "钥匙和额度错误不能吞成空成功");
+assert.match(bg, /let aiChain/, "翻译和问老师不能同时挤爆 DeepSeek");
+assert.match(bg, /AbortSignal\.timeout\(90000\)/, "DeepSeek 卡住要自己断，不能把后台挂死");
+assert.doesNotMatch(panel, /function isTranslateFatal[\s\S]{0,220}429/, "限流不能当成整片翻译失败");
+assert.match(panel, /2800/, "429 之后要多歇一会儿再翻");
+assert.match(content, /want\.length < 4/, "片子上一次不要再塞 8 句");
 assert.doesNotMatch(bg, /still\.length && still\.length < src\.length/, "整块都空也要补翻，不能跳过 mini");
 assert.match(content, /liveZhTries/, "片子上译文空了也要再试一次");
 assert.match(content, /usableTranslation/, "片子上英文回声不能当对照成功");
@@ -411,6 +416,15 @@ assert.ok(freqSrc.trim().split(/\s+/).length > 8000, "词频表要够切出雅�
   );
   assert.ok(head.some((w) => w.word === "leverage"), "句首生词不能当专有名词丢掉");
 }
+assert.match(bg, /name === "kaizen-ai"/, "翻译时要留一条端口，别让后台被掐掉");
+assert.match(bg, /vb_ai_busy/, "后台在问 DeepSeek 时要标忙，片子上别再挤");
+assert.match(bg, /function beginAi/, "问 DeepSeek 时要撑住 Service Worker");
+assert.match(bg, /!out\.some\(Boolean\) && isRethrowTranslateError/, "已经翻出一部分就不要整块丢掉");
+assert.match(panel, /function sendToBgSure/, "后台被掐后要再送一次，不能算这句翻失败");
+assert.match(panel, /connect\(\{ name: "kaizen-ai" \}\)/, "侧栏翻译时要拉住后台");
+assert.match(panel, /leftover/, "还有没翻的句子要自己再进一轮");
+assert.match(content, /vb_ai_busy/, "片子上看到侧栏在翻就先等缓存");
+assert.match(content, /120000/, "侧栏忙着时片子上至少等两分钟");
 assert.match(fs.readFileSync(path.join(root, "i18n.js"), "utf8"), /"拆解已收起。"|"正在对照…"/);
 try {
   new Function(fs.readFileSync(path.join(root, "i18n.js"), "utf8"));

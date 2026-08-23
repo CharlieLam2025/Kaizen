@@ -358,7 +358,7 @@ function isRealTranslation(zh, en) {
 
 function isTranslateFatal(result) {
   const text = `${result?.code || ""} ${result?.error || ""}`;
-  return result?.code === "NO_KEY" || /NO_KEY|401|402|钥匙|额度|欠费|429|网络|Failed to fetch|AI 请求失败/i.test(text);
+  return result?.code === "NO_KEY" || /NO_KEY|401|402|钥匙|额度|欠费/i.test(text);
 }
 
 function translationAt(i) {
@@ -377,6 +377,26 @@ function uid(prefix) {
 
 function sendToBg(message) {
   return chrome.runtime.sendMessage(message);
+}
+
+function isTranslateDropped(result) {
+  if (!result) return true;
+  const e = `${result.error || result.message || ""}`;
+  return /port closed|invalidated|receiving end|Could not establish|message failed/i.test(e);
+}
+
+async function sendToBgSure(message) {
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try {
+      last = await sendToBg(message);
+    } catch (e) {
+      last = { ok: false, error: e?.message || "message failed" };
+    }
+    if (!isTranslateDropped(last)) return last;
+    if (i < 2) await new Promise((ok) => setTimeout(ok, 700 * (i + 1)));
+  }
+  return last;
 }
 
 function sendToTab(message, tabId = state.tabId) {
@@ -1018,7 +1038,7 @@ let pendingWatchInfo = null;
 
 function markWatchStage(stage, extra = {}) {
   chrome.storage.local
-    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.9", ...extra } })
+    .set({ vb_watch_diag: { stage, at: Date.now(), version: "0.7.10", ...extra } })
     .catch(() => {});
 }
 
@@ -8864,14 +8884,19 @@ async function translateAll() {
   const videoId = state.videoId;
   const job = videoJob;
   let batchFails = 0;
+  let fatalStop = false;
+  let aiPort;
+  try {
+    aiPort = chrome.runtime.connect({ name: "kaizen-ai" });
+  } catch (_e) {}
   renderTranslateBar();
   try {
     while (job === videoJob && state.videoId === videoId && state.transcriptMode !== "original") {
       const pending = [];
-      const batch = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 10;
+      const batch = typeof TRANSLATE_BATCH === "number" ? TRANSLATE_BATCH : 6;
       for (let i = 0; i < state.segments.length && pending.length < batch; i++) {
         if (translationAt(i) || state.translateFailed[i]) continue;
-        if ((state.translateTries[i] || 0) >= 2) {
+        if ((state.translateTries[i] || 0) >= 4) {
           state.translateFailed[i] = true;
           continue;
         }
@@ -8880,7 +8905,7 @@ async function translateAll() {
       if (!pending.length) break;
       let result;
       try {
-        result = await sendToBg({
+        result = await sendToBgSure({
           action: "vbTranslate",
           lines: pending.map((i) => state.segments[i].text),
         });
@@ -8889,24 +8914,29 @@ async function translateAll() {
       }
       if (job !== videoJob || state.videoId !== videoId) break;
       if (!result?.ok) {
-        batchFails += 1;
+        const dropped = isTranslateDropped(result);
         const fatal = isTranslateFatal(result);
-        pending.forEach((i) => {
-          state.translateTries[i] = (state.translateTries[i] || 0) + 1;
-          if (fatal || state.translateTries[i] >= 2) {
-            delete state.translations[i];
-            state.translateFailed[i] = true;
-          }
-          patchRowTranslation(i);
-        });
+        if (!dropped) {
+          batchFails += 1;
+          pending.forEach((i) => {
+            state.translateTries[i] = (state.translateTries[i] || 0) + 1;
+            if (fatal || state.translateTries[i] >= 4) {
+              delete state.translations[i];
+              state.translateFailed[i] = true;
+            }
+            patchRowTranslation(i);
+          });
+        }
         if (fatal) {
+          fatalStop = true;
           flashHint(friendlyAiError(result?.error, t("这批没翻出来，点重试。")));
           break;
         }
-        if (batchFails === 1 || batchFails % 3 === 0) {
+        if (!dropped && (batchFails === 1 || batchFails % 3 === 0)) {
           flashHint(friendlyAiError(result?.error, t("这批没翻出来，点重试。")));
         }
-        await new Promise((ok) => setTimeout(ok, 900));
+        const wait = dropped || /429|频繁|too many/i.test(result?.error || "") ? 2800 : 900;
+        await new Promise((ok) => setTimeout(ok, wait));
         continue;
       }
       let got = 0;
@@ -8922,7 +8952,7 @@ async function translateAll() {
         } else {
           delete state.translations[i];
           state.translateTries[i] = (state.translateTries[i] || 0) + 1;
-          if (state.translateTries[i] >= 2) state.translateFailed[i] = true;
+          if (state.translateTries[i] >= 4) state.translateFailed[i] = true;
         }
         patchRowTranslation(i);
       });
@@ -8936,14 +8966,23 @@ async function translateAll() {
       }
       renderTranslateBar();
       backfillHandQuoteZh();
-      await new Promise((ok) => setTimeout(ok, 220));
+      await new Promise((ok) => setTimeout(ok, 480));
     }
   } finally {
+    try { aiPort?.disconnect(); } catch (_e) {}
     translateAll.busy = false;
     isTranslating = false;
     if (job === videoJob && state.videoId === videoId) {
       renderTranslateBar();
       saveCacheSoon(1500);
+      const leftover = !fatalStop && state.transcriptMode !== "original" && state.segments.some((_, i) =>
+        !translationAt(i) && !state.translateFailed[i] && (state.translateTries[i] || 0) < 4
+      );
+      if (leftover) {
+        setTimeout(() => {
+          if (job === videoJob && state.videoId === videoId && !translateAll.busy) translateAll();
+        }, 2500);
+      }
     }
   }
 }
