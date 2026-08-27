@@ -167,6 +167,7 @@ let lastFollowedStart = -1;
 let lastPlayheadAt = 0;
 let programmaticScroll = false;
 let lastUserScrollAt = 0;
+let userScrollIntentUntil = 0;
 let heavyWorkTimer = 0;
 let transcriptRows = [];
 let playingRowEl = null;
@@ -335,7 +336,7 @@ function esc(text) {
 }
 
 function escAttr(text) {
-  return esc(text).replace(/"/g, "&quot;");
+  return esc(text).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function cleanZh(text) {
@@ -824,13 +825,26 @@ function scrollToSeconds(seconds) {
 }
 
 function pauseFollowFromUser(event) {
-  if (programmaticScroll || Date.now() < followLockUntil) return;
+  // Wheel and touch never come from programmatic scrolling; eating them
+  // during the follow-lock window made dense captions un-scrollable.
+  const userIntent = event?.type === "wheel" || event?.type === "touchmove";
+  if (!userIntent && (programmaticScroll || Date.now() < followLockUntil)) return;
   const box = $("transcriptBox");
   const el = event?.target;
   if (!box || !el || (el !== box && !box.contains(el))) return;
   if (event && event.type === "wheel" && Math.abs(event.deltaY || event.deltaX || 0) < 2) return;
   lastUserScrollAt = Date.now();
   if (!followPlayback) return;
+  followPausedByUser = true;
+  updateFollowBtn();
+}
+
+// Scrollbar drags and PageDown/arrow keys emit no wheel events; a recent
+// pointer/key gesture plus a scroll means the user is moving the view.
+function pauseFollowFromScroll() {
+  if (programmaticScroll || Date.now() >= userScrollIntentUntil) return;
+  lastUserScrollAt = Date.now();
+  if (!followPlayback || followPausedByUser) return;
   followPausedByUser = true;
   updateFollowBtn();
 }
@@ -860,8 +874,10 @@ function applyPlayhead(info) {
   const active = paintPlayingRow(info.currentTime);
   if (selecting || !followPlayback || !active || !isReadView()) return;
   if (followPausedByUser) {
-    if (isRowNearCenter(active, 80)) followPausedByUser = false;
-    else return;
+    if (isRowNearCenter(active, 80)) {
+      followPausedByUser = false;
+      updateFollowBtn();
+    } else return;
   }
   const start = Number(active.dataset.start);
   if (start === lastFollowedStart && isRowNearCenter(active, 80)) return;
@@ -909,6 +925,9 @@ function syncLangButtons() {
 }
 
 function updateFollowBtn() {
+  // Free reading (follow off or paused): let the browser anchor visible rows
+  // so translation backfill above the viewport does not shove the text.
+  $("transcriptBox")?.classList.toggle("free-read", !followPlayback || followPausedByUser);
   const btn = $("followBtn");
   if (!btn) return;
   btn.classList.toggle("active", followPlayback && !followPausedByUser);
@@ -4763,6 +4782,12 @@ async function loadVideo(videoId, tabTitle = "", opts = {}) {
   isTranslating = false;
   if (typeof translateAll === "function") translateAll.busy = false;
   clearQueuedWork();
+  // Stale save timers from the previous video would write its blocks/progress
+  // into this video's cache key once state.videoId flips.
+  clearTimeout(saveCacheTimer);
+  saveCacheTimer = 0;
+  clearTimeout(saveProgressTimer);
+  saveProgressTimer = 0;
   if (state.videoId !== videoId || !state.segments.length) {
     showStateBox("K", t("正在打开字幕…"), t("铺好之后就可以划线、拆知识。"), false, true);
   }
@@ -5509,6 +5534,12 @@ async function analyzeBlocks() {
   } finally {
     isAnalyzing = false;
     if (state.videoId === videoId && state.blocks.length) setBrickStatus("");
+    // If the user switched videos while this one was in flight, the new
+    // video's queued analyzeBlocks hit the isAnalyzing guard and nothing
+    // re-queues it; give it another chance now.
+    else if (state.videoId && state.videoId !== videoId && !state.blocks.length && state.segments.length) {
+      queueBackgroundWork(state.videoId);
+    }
   }
 }
 
@@ -5829,7 +5860,7 @@ function renderStudy() {
       <button class="text-btn" id="studyRedo" type="button">${t("提纲不够？重做")}</button>`;
   } else if (studyTab === "kw") {
     body = (study?.keywords || [])
-      .map((k) => `<button class="kw" type="button" data-word="${esc(k.word)}"><b>${esc(k.word)}</b><i>${esc(k.gloss)}</i></button>`)
+      .map((k) => `<button class="kw" type="button" data-word="${escAttr(k.word)}"><b>${esc(k.word)}</b><i>${esc(k.gloss)}</i></button>`)
       .join("");
   } else if (studyTab === "q") {
     const qs = study?.questions || [];
@@ -6752,7 +6783,7 @@ function renderLinkGraph(scope) {
         .filter((e) => e.from === n.id || e.to === n.id)
         .map((e) => (e.from === n.id ? e.to : e.from))
         .join(" ");
-      return `<g class="graph-node${on ? " on" : ""}" data-gid="${n.id}" data-gkind="${n.kind}" data-cid="${n.cid || ""}" data-glabel="${esc(n.label)}" data-nb="${nbs}">
+      return `<g class="graph-node${on ? " on" : ""}" data-gid="${n.id}" data-gkind="${n.kind}" data-cid="${n.cid || ""}" data-glabel="${escAttr(n.label)}" data-nb="${nbs}">
         <circle cx="${n.x}" cy="${n.y}" r="${on ? r + 2 : r}" fill="${fill}" stroke="${st.stroke}" stroke-width="${on || n.hop === 0 ? 2 : 1.2}"/>
         ${showLabel ? graphPill(n.x, n.y + r + 6, n.label, on) : ""}
       </g>`;
@@ -8877,13 +8908,17 @@ function renderTranscript(opts = {}) {
 
 async function translateAll() {
   if (translateAll.busy) return;
-  translateAll.busy = true;
+  // Hold the lock with a unique token: a stale loop waking from an await
+  // after loadVideo force-cleared the lock must not clear the new owner's.
+  const lock = {};
+  translateAll.busy = lock;
   isTranslating = true;
   if (!state.translateFailed) state.translateFailed = {};
   if (!state.translateTries) state.translateTries = {};
   const videoId = state.videoId;
   const job = videoJob;
   let batchFails = 0;
+  let droppedRuns = 0;
   let fatalStop = false;
   let aiPort;
   try {
@@ -8916,7 +8951,17 @@ async function translateAll() {
       if (!result?.ok) {
         const dropped = isTranslateDropped(result);
         const fatal = isTranslateFatal(result);
-        if (!dropped) {
+        if (dropped) {
+          droppedRuns += 1;
+          // The background never answering means the extension context is
+          // gone; spinning forever would just look frozen.
+          if (droppedRuns >= 5) {
+            fatalStop = true;
+            flashHint(t("后台没有回应，重载扩展后再点重试。"));
+            break;
+          }
+        } else {
+          droppedRuns = 0;
           batchFails += 1;
           pending.forEach((i) => {
             state.translateTries[i] = (state.translateTries[i] || 0) + 1;
@@ -8939,6 +8984,7 @@ async function translateAll() {
         await new Promise((ok) => setTimeout(ok, wait));
         continue;
       }
+      droppedRuns = 0;
       let got = 0;
       pending.forEach((i, k) => {
         const zh = typeof usableTranslation === "function"
@@ -8970,8 +9016,10 @@ async function translateAll() {
     }
   } finally {
     try { aiPort?.disconnect(); } catch (_e) {}
-    translateAll.busy = false;
-    isTranslating = false;
+    if (translateAll.busy === lock) {
+      translateAll.busy = false;
+      isTranslating = false;
+    }
     if (job === videoJob && state.videoId === videoId) {
       renderTranslateBar();
       saveCacheSoon(1500);
@@ -10007,7 +10055,7 @@ function renderVocabDeck(root) {
             <button class="seg-btn${vocabScope === "here" ? " active" : ""}" data-vscope="here" type="button">${t("本篇")}${hereVocab.length ? ` ${hereVocab.length}` : ""}</button>
             <button class="seg-btn${vocabScope === "all" ? " active" : ""}" data-vscope="all" type="button">${t("全部")} ${vocab.length}</button>
           </div>
-          <input id="vocabSearch" class="lib-search" type="search" placeholder="${t("搜词、例句、视频标题")}" value="${esc(vocabQuery)}" />
+          <input id="vocabSearch" class="lib-search" type="search" placeholder="${t("搜词、例句、视频标题")}" value="${escAttr(vocabQuery)}" />
           <p class="note-meta">${
             vocabScope === "all"
               ? t("一本总牌组。点出处就能跳回那一支。")
@@ -10500,7 +10548,7 @@ function renderVocabCheck(root) {
             <button class="btn btn-primary review-reveal" id="vocabCheckNext" type="button">${
               vocabCheck.i + 1 >= vocabCheck.items.length ? t("看结果") : t("下一题")
             }</button>`
-          : `<input id="vocabCheckInput" class="lib-search vocab-check-in" type="text" autocomplete="off" spellcheck="false" placeholder="${placeholder}" value="${esc(vocabCheck.typed)}" />
+          : `<input id="vocabCheckInput" class="lib-search vocab-check-in" type="text" autocomplete="off" spellcheck="false" placeholder="${placeholder}" value="${escAttr(vocabCheck.typed)}" />
             <div class="row-actions">
               <button class="btn btn-primary" id="vocabCheckSubmit" type="button">${t("对答案")}</button>
               <button class="btn" id="vocabCheckMiss" type="button">${t("不会")}</button>
@@ -12848,6 +12896,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("transcriptBox")?.addEventListener("wheel", pauseFollowFromUser, { passive: true });
   $("transcriptBox")?.addEventListener("touchmove", pauseFollowFromUser, { passive: true });
+  $("transcriptBox")?.addEventListener("scroll", pauseFollowFromScroll, { passive: true });
+  window.addEventListener("scroll", pauseFollowFromScroll, { passive: true });
+  document.addEventListener("keydown", (event) => {
+    if (!["PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp", " "].includes(event.key)) return;
+    const el = event.target;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+    if (!isReadView()) return;
+    userScrollIntentUntil = Date.now() + 900;
+  });
   updateFollowBtn();
 
   $("modeOriginal").addEventListener("click", () => setTranscriptMode("original"));
@@ -12885,6 +12942,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("transcriptBox")?.addEventListener("mousedown", () => {
     selectingUntil = Date.now() + 8000;
+    userScrollIntentUntil = Date.now() + 1500;
   });
   document.addEventListener(
     "mousedown",

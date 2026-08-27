@@ -2,6 +2,10 @@
 // The panel sends transcripts/questions here; prompts live inline below.
 importScripts("site.js", "i18n.js", "i18n-dict.js");
 
+// A fresh worker has no AI call in flight; clear any busy stamp left behind
+// if the previous worker was killed between beginAi and endAi.
+chrome.storage.local.set({ vb_ai_busy: 0 }).catch(() => {});
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: false })
@@ -296,9 +300,12 @@ function extractJsonBlob(text) {
 
 /** Strips markdown fences and parses the first JSON object/array found. */
 function parseLooseJson(text) {
+  // Curly quotes are legal inside JSON strings; softenJson would corrupt
+  // valid output, so raw text must be tried first.
+  const raw = String(text || "").trim();
   const cleaned = softenJson(text);
-  const blob = extractJsonBlob(cleaned);
-  const tries = [cleaned, blob, softenJson(blob)].filter(Boolean);
+  const blob = extractJsonBlob(raw);
+  const tries = [raw, blob, cleaned, extractJsonBlob(cleaned), softenJson(blob)].filter(Boolean);
   for (const candidate of tries) {
     try {
       return JSON.parse(candidate);
@@ -322,7 +329,13 @@ let aiPulse = 0;
 function beginAi() {
   aiBusy += 1;
   chrome.storage.local.set({ vb_ai_busy: Date.now() }).catch(() => {});
-  if (!aiPulse) aiPulse = setInterval(() => {}, 15000);
+  // MV3 only resets the idle timer on real extension API calls; an empty
+  // callback would let Chrome kill the worker mid-request.
+  if (!aiPulse) {
+    aiPulse = setInterval(() => {
+      chrome.storage.local.set({ vb_ai_busy: Date.now() }).catch(() => {});
+    }, 15000);
+  }
 }
 
 function endAi() {
@@ -337,6 +350,9 @@ function endAi() {
 
 function callAi(opts) {
   if (opts?._inner) return callAiOnce(opts);
+  // Only translation batches share the serial lane; interactive asks
+  // (define / ask / dive) must not wait minutes behind queued batches.
+  if (!opts?.queue) return callAiOnce({ ...opts, _inner: true });
   const next = aiChain.then(() => callAiOnce({ ...opts, _inner: true }));
   aiChain = next.then(() => {}, () => {});
   return next;
@@ -831,8 +847,8 @@ function polishTranslateLine(zh, line) {
 }
 
 function isRethrowTranslateError(err) {
-  const text = `${err?.code || ""} ${err?.message || err || ""}`;
-  return /NO_KEY|401|402|429|5\d\d|额度|钥匙|欠费|Failed to fetch|network|网络|超时|AI 请求失败/i.test(text);
+  const text = `${err?.code || ""} ${err?.name || ""} ${err?.message || err || ""}`;
+  return /NO_KEY|401|402|429|5\d\d|额度|钥匙|欠费|Failed to fetch|network|网络|超时|timed?\s?out|TimeoutError|abort|AI 请求失败/i.test(text);
 }
 
 async function translateChunk(src, settings) {
@@ -840,6 +856,7 @@ async function translateChunk(src, settings) {
   const maxTokens = Math.min(8192, 800 + chars + src.length * 80);
   const run = async (json, tokens = maxTokens) => {
     const text = await callAi({
+      queue: true,
       system: translateSystem(settings),
       json,
       maxTokens: tokens,
@@ -874,6 +891,7 @@ async function translateChunk(src, settings) {
     try {
       const mini = still.map((i) => src[i]);
       const text = await callAi({
+        queue: true,
         system: translateSystem(settings),
         json: false,
         maxTokens: Math.min(8192, 600 + mini.reduce((n, line) => n + line.length, 0) + mini.length * 80),
@@ -1681,6 +1699,9 @@ async function fetchSupadataTranscript(videoId, settings) {
 }
 
 function withHardTimeout(promise, ms, label) {
+  // The loser keeps running after the race; without this handler its
+  // eventual rejection surfaces as an unhandled-rejection console error.
+  promise.catch(() => {});
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
@@ -1987,7 +2008,14 @@ async function handleExportEssay({ payload }) {
       summary: b.summary,
       essence: src.dives?.[i]?.essence || src.dives?.[String(i)]?.essence || "",
     })),
-    relations: (src.conceptMap?.edges || []).slice(0, 16).map((e) => `${e.from}->${e.rel}->${e.to}`),
+    relations: (() => {
+      // The concept map stores {concepts:[{id,label}], propositions:[{from,link,to}]};
+      // ids like "c1" mean nothing to the model, so map them back to labels.
+      const label = new Map((src.conceptMap?.concepts || []).map((c) => [c.id, c.label || c.id]));
+      return (src.conceptMap?.propositions || []).slice(0, 16).map(
+        (e) => `${label.get(e.from) || e.from} -${e.link || "→"}-> ${label.get(e.to) || e.to}`,
+      );
+    })(),
     questions: (src.chat || []).filter((m) => m.role === "user").slice(0, 8).map((m) => m.content),
   };
   const settings = await getSettings();

@@ -6,7 +6,7 @@
 // the extension loaded. A second listener would double-answer messages.
 // After chrome.runtime.reload(), the old world stays on the page; bump
 // the rev and remount the dock so K works without a full tab refresh.
-const VB_CONTENT_REV = 36;
+const VB_CONTENT_REV = 40;
 
 (function bootKaizenContent() {
   document.getElementById("kz-dock")?.remove();
@@ -425,9 +425,12 @@ function bindPlayhead(video) {
 }
 
 function bindVideoLoop(video) {
-  if (!video || video.__vbLoopBound) return video;
-  video.__vbLoopBound = true;
-  video.addEventListener("timeupdate", () => {
+  if (!video) return video;
+  // Same trick as __vbHeadSend: the listener survives reinstalls on the
+  // reused <video>, so it must call through a relay that each install
+  // refreshes — otherwise it keeps reading a dead generation's loopRange.
+  globalThis.__vbLoopTick = () => {
+    if (!contentLive()) return;
     if (!loopRange || loopWaiting || Date.now() < loopGuardUntil) return;
     const t = video.currentTime;
     if (t >= loopRange.end - 0.12 || t < loopRange.start - 0.6) {
@@ -451,7 +454,10 @@ function bindVideoLoop(video) {
       video.currentTime = loopRange.start;
       video.play().catch(() => {});
     }
-  });
+  };
+  if (video.__vbLoopBound) return video;
+  video.__vbLoopBound = true;
+  video.addEventListener("timeupdate", () => globalThis.__vbLoopTick?.());
   return video;
 }
 
@@ -1016,6 +1022,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   let liveZhFail = new Set();
   let liveZhFailAt = {};
   let liveZhTries = {};
+  let liveZhSnoozeUntil = 0;
+  let liveZhErrText = "";
   let liveTrackAt = 0;
   let livePtrHoldT = 0;
   let liveDragging = false;
@@ -1232,7 +1240,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const left = (start / dur) * 100;
         const width = Math.max(0.4, ((end - start) / dur) * 100);
         const color = BLOCK_COLORS[b.category] || "#b83c28";
-        const title = String(b.title || "").replace(/"/g, "");
+        const title = escLive(String(b.title || ""));
         return `<i class="kz-ch" style="left:${left}%;width:${width}%;background:${color}" title="${title}"></i>`;
       })
       .join("")}</div>`;
@@ -1289,9 +1297,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const pins = playerMarkState.marks
         .map((m) => {
           const pct = Math.max(0, Math.min(100, (Number(m.seconds) / dur) * 100));
-          const label = String(m.label || "").replace(/"/g, "");
-          const note = String(m.note || "").replace(/"/g, "").replace(/\n/g, " ");
-          const tip = note ? `${playerClock(m.seconds)} ${label} — ${note}` : `${playerClock(m.seconds)} ${label}`;
+          const label = String(m.label || "");
+          const note = String(m.note || "").replace(/\n/g, " ");
+          const tip = escLive(note ? `${playerClock(m.seconds)} ${label} — ${note}` : `${playerClock(m.seconds)} ${label}`);
           return `<button type="button" class="kz-pin${note ? " has-note" : ""}" data-sec="${Number(m.seconds) || 0}" style="left:${pct}%" title="${tip}">${face}</button>`;
         })
         .join("");
@@ -1609,6 +1617,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return String(text || "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
 
@@ -1994,6 +2003,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     paintLexActions(card);
     placeLexCard();
     if (cached) return;
+    // Resolve the card fresh at write time: a dock remount can replace the
+    // element, and writing into the captured (detached) node leaves the new
+    // card stuck on the loading text.
+    const paintLex = (html) => {
+      const el = document.getElementById("kz-lex");
+      if (el && el.dataset.word === word) fillLexBody(el, html);
+    };
     chrome.storage.local.get("vb_vocab", async (stored) => {
       if (liveWord !== word) return;
       const hit = (stored.vb_vocab || []).find(
@@ -2001,7 +2017,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       );
       if (hit?.definition) {
         liveDefCache.set(word.toLowerCase(), hit.definition);
-        fillLexBody(card, compactDefHtml(hit.definition));
+        paintLex(compactDefHtml(hit.definition));
         return;
       }
       const res = await sendLiveBg({
@@ -2010,16 +2026,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sentence: line.text,
         videoTitle: currentVideoInfo().title || "",
       });
-      if (liveWord !== word || !document.getElementById("kz-lex")) return;
+      if (liveWord !== word) return;
       if (!res?.ok || !res.definition) {
-        fillLexBody(
-          card,
+        paintLex(
           `<div class="kz-lex-err">${escLive(liveAiError(res))}<button type="button" data-act="retry">${escLive(t("再试一次"))}</button></div>`,
         );
         return;
       }
       liveDefCache.set(word.toLowerCase(), res.definition);
-      fillLexBody(card, compactDefHtml(res.definition));
+      paintLex(compactDefHtml(res.definition));
     });
   }
 
@@ -2102,12 +2117,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return n >= Math.min(3, liveSegments.length);
   }
 
-  function persistLiveTranslations() {
-    const id = videoIdFromUrl(location.href);
+  function persistLiveTranslations(id = videoIdFromUrl(location.href)) {
     if (!id || !Object.keys(liveTranslations).length) return;
     chrome.storage.local.get(`vb_cache_${id}`, (stored) => {
+      if (!liveStill(id) || liveSegId !== id) return;
       const pack = stored[`vb_cache_${id}`];
       if (!pack) return;
+      // Live indexes only line up with the pack when both hold the same
+      // track; merging across tracks bakes misaligned Chinese into cache.
+      if (liveSegFinger(pack.segments) !== liveSegFinger(liveSegments)) return;
       chrome.storage.local.set({
         [`vb_cache_${id}`]: {
           ...pack,
@@ -2117,8 +2135,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
   }
 
+  function liveTrackChanged(id, gen) {
+    return !liveStill(id) || liveSegId !== id || (ensureLiveSegments._gen || 0) !== gen;
+  }
+
   async function translateLiveAround(idx) {
     if (!Number.isInteger(idx) || liveMode === "original") return;
+    if (Date.now() < liveZhSnoozeUntil) return;
+    const id = videoIdFromUrl(location.href);
+    const gen = ensureLiveSegments._gen || 0;
     const want = [];
     for (let d = 0; d <= 3 && want.length < 4; d++) {
       for (const i of d === 0 ? [idx] : [idx - d, idx + d]) {
@@ -2133,17 +2158,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       const stored = await chrome.storage.local.get("vb_ai_busy");
       const busyAt = Number(stored?.vb_ai_busy || 0);
-      if (busyAt && Date.now() - busyAt < 120000) return;
+      if (busyAt && Date.now() - busyAt < 45000) {
+        liveZhSnoozeUntil = Date.now() + 3000;
+        return;
+      }
     } catch (_e) {}
+    if (liveTrackChanged(id, gen)) return;
     want.forEach((i) => liveZhAsked.add(i));
     try {
       const res = await chrome.runtime.sendMessage({
         action: "vbTranslate",
         lines: want.map((i) => liveSegments[i].text),
       });
+      // Answers landing after a video/track switch would be written under
+      // stale indexes and poison the new video's cache.
+      if (liveTrackChanged(id, gen)) return;
       if (!res?.ok) {
         const errText = `${res?.code || ""} ${res?.error || ""}`;
-        if (!res || /port closed|invalidated|receiving end|Could not establish|message failed/i.test(errText)) return;
+        if (!res || /port closed|invalidated|receiving end|Could not establish|message failed/i.test(errText)) {
+          liveZhSnoozeUntil = Date.now() + 3000;
+          return;
+        }
         const fatal = /NO_KEY|401|402|钥匙|额度|欠费/i.test(errText);
         want.forEach((i) => {
           liveZhAsked.delete(i);
@@ -2154,9 +2189,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
         });
         if (fatal) {
+          // Keep the real reason around: the next repaint would otherwise
+          // replace it with the generic failure text within one pulse.
+          liveZhErrText = liveAiError(res);
           const zh = document.getElementById("kz-live")?.querySelectorAll(".kz-live-pane")[liveFront]?.querySelector(".kz-live-zh");
           if (zh) {
-            zh.textContent = liveAiError(res);
+            zh.textContent = liveZhErrText;
             zh.hidden = false;
           }
         }
@@ -2174,6 +2212,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           liveZhFail.delete(i);
           delete liveZhFailAt[i];
           delete liveZhTries[i];
+          liveZhErrText = "";
           wrote = true;
         } else {
           liveZhAsked.delete(i);
@@ -2181,9 +2220,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           if (liveZhTries[i] >= 3) markLiveZhFail(i);
         }
       });
-      if (wrote) persistLiveTranslations();
+      if (wrote) persistLiveTranslations(id);
     } catch (_e) {
-      if (/port closed|invalidated|receiving end|Could not establish|message failed/i.test(String(_e?.message || _e))) return;
+      if (liveTrackChanged(id, gen)) return;
+      if (/port closed|invalidated|receiving end|Could not establish|message failed/i.test(String(_e?.message || _e))) {
+        liveZhSnoozeUntil = Date.now() + 3000;
+        return;
+      }
       want.forEach((i) => {
         liveZhTries[i] = (liveZhTries[i] || 0) + 1;
         if (liveZhTries[i] >= 2) markLiveZhFail(i);
@@ -2208,9 +2251,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const data = await getTranscript(id);
         if (!liveStill(id)) return;
         liveFetchedAt = id;
-        if (data?.translations && Object.keys(data.translations).length) {
+        const aligned = !data?.segments?.length || liveSegFinger(data.segments) === liveSegFinger(liveSegments);
+        if (aligned && data?.translations && Object.keys(data.translations).length) {
           liveTranslations = { ...data.translations, ...liveTranslations };
-          persistLiveTranslations();
+          persistLiveTranslations(id);
         }
       }
       if (!liveStill(id)) return;
@@ -2264,7 +2308,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     const idx = line.hit?.idx;
     if (Number.isInteger(idx) && liveZhBlocked(idx)) {
-      zh.textContent = t("这句没翻出来");
+      zh.textContent = liveZhErrText || t("这句没翻出来");
       zh.hidden = false;
       return;
     }
@@ -2316,7 +2360,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     const idx = line.hit?.idx;
     if (Number.isInteger(idx) && liveZhBlocked(idx)) {
-      zh.textContent = t("这句没翻出来");
+      zh.textContent = liveZhErrText || t("这句没翻出来");
       zh.hidden = false;
       return;
     }
@@ -2420,7 +2464,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
     const line = liveLineAt(pageVideo()?.currentTime || 0);
-    if (liveMode !== "original" && !line.zh) {
+    if (liveMode !== "original" && !line.zh && Date.now() >= liveZhSnoozeUntil) {
       const idx = line.hit?.idx;
       if (Number.isInteger(idx) && !liveZhBlocked(idx) && !liveZhAsked.has(idx) && !liveZhBusy) fillLiveZh();
     }
@@ -2543,8 +2587,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (track.translations) liveTranslations = { ...liveTranslations, ...track.translations };
       return false;
     }
+    // A pack without savedAt is old-format data; treat it as the oldest
+    // instead of letting it bypass the rollback guard.
     const nextAt = Number(track.savedAt) || 0;
-    if (liveSegId === id && liveSegments.length && liveTrackAt && nextAt > 0 && nextAt < liveTrackAt) return false;
+    if (liveSegId === id && liveSegments.length && liveTrackAt && nextAt < liveTrackAt) return false;
     applyLiveSegs(id, segs, track.translations);
     liveTrackAt = nextAt || Date.now();
     bumpLiveSegGen();
@@ -2812,6 +2858,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     liveZhFailAt = {};
     liveZhTries = {};
     liveZhBusy = false;
+    liveZhSnoozeUntil = 0;
+    liveZhErrText = "";
     liveWord = "";
     closeLexCard();
     livePaintKey = "";
