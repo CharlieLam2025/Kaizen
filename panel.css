@@ -2080,6 +2080,7 @@ svg.arg-map {
 }
 
 .t-row:hover { background: rgba(28, 24, 18, 0.03); }
+#transcriptBox.free-read .t-row { overflow-anchor: auto; }
 .t-row.playing {
   border-left-color: var(--accent);
   background: rgba(196, 71, 45, 0.06);

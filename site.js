@@ -187,11 +187,15 @@ function pickTranslateRows(parsed, expectedLen) {
       .filter((k) => /^\d+$/.test(k))
       .sort((a, b) => Number(a) - Number(b));
     if (keys.length) {
-      const last = Math.max(...keys.map(Number));
+      // Models sometimes number lines starting at 1; shift back so the
+      // whole batch does not land one row off.
+      const min = Number(keys[0]);
+      const shift = min === 1 && Number.isInteger(expectedLen) && Number(keys[keys.length - 1]) === expectedLen ? 1 : 0;
+      const last = Math.max(...keys.map(Number)) - shift;
       const len = Number.isInteger(expectedLen) ? Math.max(expectedLen, last + 1) : last + 1;
       rows = Array.from({ length: len }, () => "");
       keys.forEach((k) => {
-        rows[Number(k)] = parsed[k];
+        rows[Number(k) - shift] = parsed[k];
       });
       return rows;
     }
